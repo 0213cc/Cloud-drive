@@ -3,14 +3,16 @@
 """
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from typing import Optional
 
 
 class Settings(BaseSettings):
     """应用配置"""
     
     # AWS配置
-    aws_access_key_id: str
-    aws_secret_access_key: str
+    # 如果EC2有IAM角色，这些可以为空，boto3会自动使用IAM角色
+    aws_access_key_id: Optional[str] = None
+    aws_secret_access_key: Optional[str] = None
     aws_region: str = "ap-northeast-1"
     aws_s3_bucket: str
     
