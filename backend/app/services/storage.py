@@ -20,12 +20,23 @@ class S3StorageService:
     
     def __init__(self):
         """初始化S3客户端"""
-        self.s3_client = boto3.client(
-            's3',
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region
-        )
+        # 如果提供了Access Key，使用显式凭证
+        # 否则boto3会自动使用EC2 IAM角色（更安全）
+        if settings.aws_access_key_id and settings.aws_secret_access_key:
+            logger.info("Using explicit AWS credentials (Access Key)")
+            self.s3_client = boto3.client(
+                's3',
+                aws_access_key_id=settings.aws_access_key_id,
+                aws_secret_access_key=settings.aws_secret_access_key,
+                region_name=settings.aws_region
+            )
+        else:
+            logger.info("Using IAM role credentials (EC2 Instance Profile)")
+            self.s3_client = boto3.client(
+                's3',
+                region_name=settings.aws_region
+            )
+        
         self.bucket_name = settings.aws_s3_bucket
         self.chunk_size = settings.chunk_size
         self.max_concurrency = settings.max_concurrency
