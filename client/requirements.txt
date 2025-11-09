@@ -1,0 +1,13 @@
+# HTTP Client
+requests==2.31.0
+httpx==0.25.2
+
+# Progress Bar
+tqdm==4.66.1
+
+# CLI Framework
+click==8.1.7
+
+# Configuration
+python-dotenv==1.0.0
+
