@@ -11,3 +11,9 @@ click==8.1.7
 # Configuration
 python-dotenv==1.0.0
 
+# File System Monitoring
+watchdog==3.0.0
+
+# Database
+sqlalchemy==2.0.23
+

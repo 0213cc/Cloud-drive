@@ -7,6 +7,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from app.api.files import router as files_router
+from app.api.sync import router as sync_router
 from app.models.database import init_db
 
 # 配置日志
@@ -48,6 +49,7 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(files_router)
+app.include_router(sync_router)
 
 
 @app.get("/")

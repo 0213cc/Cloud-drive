@@ -107,7 +107,7 @@ sudo apt install nginx -y  # Web服务器（可选）
 # 方法A: 从GitHub克隆（推荐）
 cd ~
 git clone https://github.com/YOUR_USERNAME/cloud-drive.git
-cd cloud-drive
+cd Cloud-drive
 
 # 方法B: 如果没有GitHub，从本地SCP上传
 # 在本地Windows运行：
@@ -118,7 +118,7 @@ cd cloud-drive
 
 ```bash
 # 进入后端目录
-cd ~/cloud-drive/backend
+cd ~/Cloud-drive/backend
 
 # 创建虚拟环境
 python3 -m venv venv
