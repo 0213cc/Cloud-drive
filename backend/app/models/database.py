@@ -32,6 +32,11 @@ def get_db():
 
 
 def init_db():
-    """初始化数据库"""
-    Base.metadata.create_all(bind=engine)
+    """初始化数据库，如果表不存在则创建表"""
+    # 在这里导入所有模型，以便Base有正确的元数据
+    # 否则，如果其他地方没有导入模型，create_all将不知道要创建什么表
+    from app.models import user, file  # noqa
+
+    # checkfirst=True 会在创建表之前检查表是否存在
+    Base.metadata.create_all(bind=engine, checkfirst=True)
 
