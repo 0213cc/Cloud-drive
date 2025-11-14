@@ -9,14 +9,11 @@ from datetime import datetime
 
 from app.models.database import get_db
 from app.models.file import File as FileModel
+from app.utils.jwt_handler import get_current_user_id
 
 router = APIRouter(prefix="/api/sync", tags=["sync"])
 
-
-# 模拟用户认证
-def get_current_user_id() -> int:
-    """获取当前用户ID（临时mock）"""
-    return 1
+# 用户认证通过JWT实现（已在jwt_handler.py中定义）
 
 
 class FileChangeInfo(BaseModel):

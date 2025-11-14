@@ -13,6 +13,7 @@ from datetime import datetime
 from app.services.storage import S3StorageService
 from app.models.database import get_db
 from app.models.file import File as FileModel
+from app.utils.jwt_handler import get_current_user_id
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -59,11 +60,7 @@ def get_storage_service():
     """获取存储服务"""
     return S3StorageService()
 
-
-# 模拟用户认证（简化版，后续可以添加JWT）
-def get_current_user_id() -> int:
-    """获取当前用户ID（临时mock）"""
-    return 1  # TODO: 实现真正的用户认证
+# 用户认证通过JWT实现（已在jwt_handler.py中定义）
 
 
 @router.post("/upload", response_model=UploadResponse)

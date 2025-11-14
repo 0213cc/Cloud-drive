@@ -3,24 +3,52 @@
 """
 import requests
 import os
+import sys
 from typing import Optional, Dict, List
 from tqdm import tqdm
 import json
+from pathlib import Path
+
+# 添加src目录到路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
 from config import config
+from auth_client import AuthClient
 
 
 class CloudDriveClient:
     """云盘客户端"""
     
-    def __init__(self, base_url: str = None):
+    def __init__(self, base_url: str = None, auth_client: AuthClient = None):
         """
         初始化客户端
         
         Args:
             base_url: API基础URL
+            auth_client: 认证客户端（可选）
         """
         self.base_url = base_url or config.API_BASE_URL
         self.session = requests.Session()
+        self.auth_client = auth_client or AuthClient(self.base_url)
+    
+    def _get_headers(self) -> dict:
+        """
+        获取请求头（包含认证信息）
+        
+        Returns:
+            请求头字典
+        """
+        headers = {}
+        
+        # 如果已认证，添加Authorization头
+        if self.auth_client and self.auth_client.is_authenticated():
+            try:
+                auth_header = self.auth_client.get_auth_header()
+                headers.update(auth_header)
+            except:
+                pass  # 未认证时忽略
+        
+        return headers
     
     def upload_file(
         self, 
@@ -70,9 +98,10 @@ class CloudDriveClient:
             
             files = {'file': (filename, f)}
             params = {'path': remote_path}
+            headers = self._get_headers()
             
             try:
-                response = self.session.post(url, files=files, params=params)
+                response = self.session.post(url, files=files, params=params, headers=headers)
                 
                 if show_progress:
                     progress_bar.close()
@@ -113,7 +142,8 @@ class CloudDriveClient:
         
         try:
             # 流式下载
-            response = self.session.get(url, stream=True)
+            headers = self._get_headers()
+            response = self.session.get(url, stream=True, headers=headers)
             
             if response.status_code != 200:
                 error_msg = response.json().get('detail', '未知错误')
@@ -178,9 +208,10 @@ class CloudDriveClient:
         """
         url = f"{self.base_url}/api/files/list"
         params = {'path': path}
+        headers = self._get_headers()
         
         try:
-            response = self.session.get(url, params=params)
+            response = self.session.get(url, params=params, headers=headers)
             
             if response.status_code == 200:
                 result = response.json()
@@ -216,9 +247,10 @@ class CloudDriveClient:
             删除结果
         """
         url = f"{self.base_url}/api/files/delete/{file_id}"
+        headers = self._get_headers()
         
         try:
-            response = self.session.delete(url)
+            response = self.session.delete(url, headers=headers)
             
             if response.status_code == 200:
                 print(f"✓ 删除成功: 文件ID {file_id}")
@@ -244,9 +276,10 @@ class CloudDriveClient:
         """
         url = f"{self.base_url}/api/files/mkdir"
         params = {'path': path}
+        headers = self._get_headers()
         
         try:
-            response = self.session.post(url, params=params)
+            response = self.session.post(url, params=params, headers=headers)
             
             if response.status_code == 200:
                 print(f"✓ 创建目录成功: {path}")
@@ -271,9 +304,10 @@ class CloudDriveClient:
             文件信息
         """
         url = f"{self.base_url}/api/files/info/{file_id}"
+        headers = self._get_headers()
         
         try:
-            response = self.session.get(url)
+            response = self.session.get(url, headers=headers)
             
             if response.status_code == 200:
                 info = response.json()
@@ -304,6 +338,67 @@ def main():
     def cli():
         """云盘客户端命令行工具"""
         pass
+    
+    @cli.command()
+    @click.option('--username', prompt=True, help='用户名')
+    @click.option('--email', prompt=True, help='邮箱')
+    @click.option('--password', prompt=True, hide_input=True, confirmation_prompt=True, help='密码')
+    def register(username, email, password):
+        """注册新用户"""
+        auth_client = AuthClient(config.API_BASE_URL)
+        result = auth_client.register(username, email, password)
+        
+        if result.get('success'):
+            print(f"\n✓ 注册成功！")
+            print(f"  用户名: {result.get('username')}")
+            print(f"  用户ID: {result.get('user_id')}")
+            print(f"\n现在可以使用客户端上传下载文件了")
+        else:
+            print(f"\n✗ 注册失败: {result.get('error')}")
+    
+    @cli.command()
+    @click.option('--username', prompt=True, help='用户名')
+    @click.option('--password', prompt=True, hide_input=True, help='密码')
+    def login(username, password):
+        """用户登录"""
+        auth_client = AuthClient(config.API_BASE_URL)
+        result = auth_client.login(username, password)
+        
+        if result.get('success'):
+            print(f"\n✓ 登录成功！")
+            print(f"  用户名: {result.get('username')}")
+            print(f"  用户ID: {result.get('user_id')}")
+            print(f"\nToken已保存，后续操作将自动认证")
+        else:
+            print(f"\n✗ 登录失败: {result.get('error')}")
+    
+    @cli.command()
+    def logout():
+        """退出登录"""
+        auth_client = AuthClient(config.API_BASE_URL)
+        auth_client.logout()
+        print("\n✓ 已退出登录")
+    
+    @cli.command()
+    def whoami():
+        """查看当前登录用户"""
+        auth_client = AuthClient(config.API_BASE_URL)
+        
+        if not auth_client.is_authenticated():
+            print("\n未登录")
+            print("使用 'python client.py login' 登录")
+            return
+        
+        result = auth_client.get_user_info()
+        
+        if result.get('success'):
+            print(f"\n当前用户:")
+            print(f"  用户名: {result.get('username')}")
+            print(f"  邮箱: {result.get('email')}")
+            print(f"  用户ID: {result.get('id')}")
+            print(f"  注册时间: {result.get('created_at')}")
+        else:
+            print(f"\n获取用户信息失败: {result.get('error')}")
     
     @cli.command()
     @click.argument('file_path')

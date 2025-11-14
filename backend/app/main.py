@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 
 from app.api.files import router as files_router
 from app.api.sync import router as sync_router
+from app.api.auth import router as auth_router
 from app.models.database import init_db
 
 # 配置日志
@@ -33,8 +34,8 @@ async def lifespan(app: FastAPI):
 # 创建FastAPI应用
 app = FastAPI(
     title="Cloud Drive API",
-    description="云盘服务API - 支持多线程上传下载",
-    version="0.1.0",
+    description="云盘服务API - 支持多线程上传下载、用户认证、自动同步",
+    version="0.2.0",
     lifespan=lifespan
 )
 
@@ -48,6 +49,7 @@ app.add_middleware(
 )
 
 # 注册路由
+app.include_router(auth_router)
 app.include_router(files_router)
 app.include_router(sync_router)
 
