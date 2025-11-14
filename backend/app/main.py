@@ -40,12 +40,19 @@ app = FastAPI(
 )
 
 # CORS配置
+origins = [
+    "http://localhost:8001",  # 允许本地前端开发服务器
+    "http://127.0.0.1:8001",
+    # 如果你将前端部署到服务器上，也需要添加对应的地址
+    # "http://ec2-3-112-92-41.ap-northeast-1.compute.amazonaws.com"
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应该限制具体域名
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # 注册路由
