@@ -291,13 +291,27 @@ server {
     client_max_body_size 5G;  # 允许上传大文件
 
     location / {
+        # Handle preflight (OPTIONS) requests for CORS
+        if ($request_method = 'OPTIONS') {
+            add_header 'Access-Control-Allow-Origin' '*';
+            add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, DELETE, PUT';
+            add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type';
+            add_header 'Access-Control-Max-Age' 1728000;
+            add_header 'Content-Type' 'text/plain; charset=utf-8';
+            add_header 'Content-Length' 0;
+            return 204;
+        }
+
+        # Add CORS headers to actual requests
+        add_header 'Access-Control-Allow-Origin' '*' always;
+
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         
-        # 超时设置（大文件上传）
+        # Timeout settings for large file uploads
         proxy_connect_timeout 600;
         proxy_send_timeout 600;
         proxy_read_timeout 600;

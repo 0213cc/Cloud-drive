@@ -1,0 +1,247 @@
+/* General Styles */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: #f4f7f9;
+    color: #333;
+    margin: 0;
+    padding: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+}
+
+.container {
+    width: 100%;
+    max-width: 900px;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    padding: 20px 40px;
+    box-sizing: border-box;
+}
+
+/* Authentication Forms */
+#auth-container {
+    max-width: 400px;
+    margin: 40px auto;
+}
+
+.form-container h2 {
+    text-align: center;
+    color: #2c3e50;
+    margin-bottom: 24px;
+}
+
+.input-group {
+    margin-bottom: 16px;
+}
+
+.input-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: #555;
+}
+
+.input-group input {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-sizing: border-box;
+    transition: border-color 0.3s;
+}
+
+.input-group input:focus {
+    outline: none;
+    border-color: #3498db;
+}
+
+.btn {
+    width: 100%;
+    padding: 12px;
+    background-color: #3498db;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 600;
+    transition: background-color 0.3s;
+}
+
+.btn:hover {
+    background-color: #2980b9;
+}
+
+.btn-secondary {
+    background-color: #7f8c8d;
+}
+
+.btn-secondary:hover {
+    background-color: #6c7a7b;
+}
+
+.toggle-link {
+    text-align: center;
+    margin-top: 16px;
+}
+
+.toggle-link a {
+    color: #3498db;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+/* Header */
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 16px;
+    margin-bottom: 24px;
+}
+
+header h1 {
+    margin: 0;
+    color: #2c3e50;
+}
+
+#user-info {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+#username-display {
+    font-weight: 600;
+}
+
+/* Toolbar */
+.toolbar {
+    margin-bottom: 24px;
+    display: flex;
+    gap: 16px;
+}
+
+.toolbar .btn {
+    width: auto;
+    padding: 10px 16px;
+}
+
+/* File List */
+#file-list-container {
+    width: 100%;
+}
+
+#file-list {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#file-list th, #file-list td {
+    padding: 12px;
+    text-align: left;
+    border-bottom: 1px solid #eee;
+}
+
+#file-list th {
+    font-weight: 600;
+    color: #555;
+}
+
+#file-list-body tr:hover {
+    background-color: #f9f9f9;
+}
+
+.file-name {
+    font-weight: 600;
+    color: #2980b9;
+    cursor: pointer;
+    text-decoration: none;
+}
+
+.file-name:hover {
+    text-decoration: underline;
+}
+
+.action-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    margin-right: 8px;
+    font-size: 14px;
+    color: #7f8c8d;
+}
+
+.action-btn:hover {
+    color: #3498db;
+}
+
+.delete-btn:hover {
+    color: #e74c3c;
+}
+
+/* Message Box */
+.message-box {
+    margin-top: 16px;
+    padding: 12px;
+    border-radius: 4px;
+    text-align: center;
+    display: none;
+}
+
+.message-box.success {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+    display: block;
+}
+
+.message-box.error {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+    display: block;
+}
+
+/* Upload Progress */
+#upload-progress-container {
+    margin-top: 20px;
+}
+
+.progress-bar {
+    width: 100%;
+    height: 10px;
+    background-color: #eee;
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+#progress-bar-fill {
+    width: 0%;
+    height: 100%;
+    background-color: #3498db;
+    transition: width 0.3s;
+}
+
+/* Loading Spinner */
+.spinner {
+    border: 4px solid #f3f3f3;
+    border-top: 4px solid #3498db;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+    margin: 40px auto;
+    display: none; /* Initially hidden */
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
