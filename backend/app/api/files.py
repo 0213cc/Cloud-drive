@@ -107,14 +107,16 @@ async def upload_file(
         with open(temp_file_path, 'rb') as f:
             hash_value = storage.calculate_file_hash(f)
         
-        # 4. 生成S3键
-        # 格式: users/{user_id}/{path}/{filename}
+        # 4. 生成唯一的S3键
+        timestamp = int(datetime.utcnow().timestamp())
+        unique_filename = f"{timestamp}_{file.filename}"
         clean_path = path.strip('/').strip()
+        
         if clean_path:
-            s3_key = f"users/{user_id}/{clean_path}/{file.filename}"
+            s3_key = f"users/{user_id}/{clean_path}/{unique_filename}"
             full_path = f"/{clean_path}/{file.filename}"
         else:
-            s3_key = f"users/{user_id}/{file.filename}"
+            s3_key = f"users/{user_id}/{unique_filename}"
             full_path = f"/{file.filename}"
         
         # 5. 上传到S3
@@ -130,7 +132,6 @@ async def upload_file(
             raise HTTPException(status_code=500, detail=f"上传失败: {result.get('error')}")
         
         # 6. 保存元数据到数据库
-        # 检查是否已存在同名文件
         existing_file = db.query(FileModel).filter(
             FileModel.user_id == user_id,
             FileModel.path == full_path,
@@ -190,7 +191,6 @@ async def upload_file(
         )
         
     except Exception as e:
-        # 清理临时文件
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
         raise HTTPException(status_code=500, detail=str(e))
@@ -205,10 +205,7 @@ async def download_file(
 ):
     """
     下载文件
-    
-    - 支持多线程下载大文件
     """
-    # 1. 查询文件元数据
     db_file = db.query(FileModel).filter(
         FileModel.id == file_id,
         FileModel.user_id == user_id
@@ -220,26 +217,22 @@ async def download_file(
     if db_file.is_directory:
         raise HTTPException(status_code=400, detail="不能下载目录")
     
-    # 2. 创建临时文件
     temp_file_path = tempfile.mktemp(suffix=f"_{db_file.filename}")
     
     try:
-        # 3. 从S3下载
         result = storage.download_file(db_file.s3_key, temp_file_path)
         
         if not result['success']:
             raise HTTPException(status_code=500, detail=f"下载失败: {result.get('error')}")
         
-        # 4. 返回文件
         return FileResponse(
             path=temp_file_path,
             filename=db_file.filename,
             media_type=db_file.content_type or 'application/octet-stream',
-            background=None  # 手动清理
+            background=None
         )
         
     except Exception as e:
-        # 清理临时文件
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
         raise HTTPException(status_code=500, detail=str(e))
@@ -254,17 +247,13 @@ async def list_files(
     """
     列出文件和目录
     """
-    # 规范化路径
     clean_path = "/" + path.strip('/').strip()
     
-    # 查询指定路径下的文件
     query = db.query(FileModel).filter(
         FileModel.user_id == user_id
     )
     
-    # 如果不是根目录，过滤路径
     if clean_path != "/":
-        # 查询该路径下的直接子项
         query = query.filter(FileModel.path.like(f"{clean_path}%"))
     
     files = query.order_by(FileModel.is_directory.desc(), FileModel.filename).all()
@@ -285,7 +274,6 @@ async def delete_file(
     """
     删除文件
     """
-    # 1. 查询文件
     db_file = db.query(FileModel).filter(
         FileModel.id == file_id,
         FileModel.user_id == user_id
@@ -295,13 +283,13 @@ async def delete_file(
         raise HTTPException(status_code=404, detail="文件不存在")
     
     try:
-        # 2. 从S3删除
+        # S3中的历史版本暂时不删除，可以作为备份
         result = storage.delete_file(db_file.s3_key)
         
         if not result['success']:
-            raise HTTPException(status_code=500, detail=f"删除失败: {result.get('error')}")
+            # 即使S3删除失败，也继续删除数据库记录
+            pass
         
-        # 3. 从数据库删除
         db.delete(db_file)
         db.commit()
         
@@ -323,13 +311,9 @@ async def create_directory(
 ):
     """
     创建目录
-    
-    注意：S3本身没有目录概念，这里只在数据库中创建记录
     """
-    # 规范化路径
     clean_path = "/" + path.strip('/').strip()
     
-    # 检查是否已存在
     existing = db.query(FileModel).filter(
         FileModel.user_id == user_id,
         FileModel.path == clean_path,
@@ -339,16 +323,14 @@ async def create_directory(
     if existing:
         raise HTTPException(status_code=400, detail="目录已存在")
     
-    # 创建目录记录
     dir_name = os.path.basename(clean_path)
-    parent_path = os.path.dirname(clean_path)
     
     db_dir = FileModel(
         user_id=user_id,
         path=clean_path,
         filename=dir_name,
         size=0,
-        s3_key=f"users/{user_id}{clean_path}/.keep",  # 占位符
+        s3_key=f"users/{user_id}{clean_path}/.keep",
         is_directory=True
     )
     
@@ -391,7 +373,6 @@ async def get_file_history(
     """
     获取文件历史版本
     """
-    # 检查文件是否存在
     db_file = db.query(FileModel).filter(
         FileModel.id == file_id,
         FileModel.user_id == user_id
@@ -409,12 +390,12 @@ async def revert_file_version(
     file_id: int,
     version: int = Query(..., description="要回滚到的版本号"),
     db: Session = Depends(get_db),
+    storage: S3StorageService = Depends(get_storage_service),
     user_id: int = Depends(get_current_user_id)
 ):
     """
     回滚文件到指定版本
     """
-    # 1. 查找当前文件
     db_file = db.query(FileModel).filter(
         FileModel.id == file_id,
         FileModel.user_id == user_id
@@ -422,7 +403,6 @@ async def revert_file_version(
     if not db_file:
         raise HTTPException(status_code=404, detail="文件不存在")
 
-    # 2. 查找目标历史版本
     history_version = db.query(FileHistory).filter(
         FileHistory.file_id == file_id,
         FileHistory.version == version
@@ -431,7 +411,7 @@ async def revert_file_version(
         raise HTTPException(status_code=404, detail="历史版本不存在")
 
     try:
-        # 3. 将当前版本存入历史记录
+        # 1. 将当前版本存入历史记录
         current_version_history = FileHistory(
             file_id=db_file.id,
             version=db_file.version,
@@ -442,15 +422,24 @@ async def revert_file_version(
         )
         db.add(current_version_history)
 
-        # 4. 用历史版本覆盖当前文件记录
+        # 2. 从S3复制历史版本文件作为新文件
+        clean_path = os.path.dirname(db_file.path).strip('/')
+        timestamp = int(datetime.utcnow().timestamp())
+        new_s3_key = f"users/{user_id}/{clean_path}/{timestamp}_{db_file.filename}" if clean_path else f"users/{user_id}/{timestamp}_{db_file.filename}"
+        
+        copy_result = storage.copy_file(history_version.s3_key, new_s3_key)
+        if not copy_result['success']:
+            raise HTTPException(status_code=500, detail="S3文件复制失败")
+
+        # 3. 用历史版本元数据和新的S3信息覆盖当前文件记录
         db_file.size = history_version.size
         db_file.hash_value = history_version.hash_value
-        db_file.s3_key = history_version.s3_key
-        db_file.s3_etag = history_version.s3_etag
-        db_file.version += 1  # 版本号增加
+        db_file.s3_key = new_s3_key
+        db_file.s3_etag = copy_result.get('etag')
+        db_file.version += 1
         db_file.updated_at = datetime.utcnow()
 
-        # 5. 从历史记录中删除已恢复的版本
+        # 4. 从历史记录中删除已恢复的版本
         db.delete(history_version)
         
         db.commit()

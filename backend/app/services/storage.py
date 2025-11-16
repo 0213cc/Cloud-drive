@@ -384,6 +384,44 @@ class S3StorageService:
                 'error': str(e)
             }
     
+    def copy_file(self, source_key: str, destination_key: str) -> Dict:
+        """
+        在S3中复制文件
+
+        Args:
+            source_key: 源对象键
+            destination_key: 目标对象键
+
+        Returns:
+            复制结果字典
+        """
+        try:
+            copy_source = {
+                'Bucket': self.bucket_name,
+                'Key': source_key
+            }
+            response = self.s3_client.copy_object(
+                CopySource=copy_source,
+                Bucket=self.bucket_name,
+                Key=destination_key
+            )
+            
+            etag = response.get('CopyObjectResult', {}).get('ETag', '').strip('"')
+
+            logger.info(f"文件已从 {source_key} 复制到 {destination_key}")
+            
+            return {
+                'success': True,
+                's3_key': destination_key,
+                'etag': etag
+            }
+        except ClientError as e:
+            logger.error(f"S3文件复制失败: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
     def delete_file(self, s3_key: str) -> Dict:
         """
         删除文件
