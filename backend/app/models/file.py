@@ -32,7 +32,29 @@ class File(Base):
     # 时间戳
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    version = Column(Integer, default=1, nullable=False)
     
     def __repr__(self):
         return f"<File(path='{self.path}', filename='{self.filename}')>"
 
+class FileHistory(Base):
+    """文件历史版本表"""
+    __tablename__ = "file_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(Integer, ForeignKey("files.id"), nullable=False, index=True)
+    version = Column(Integer, nullable=False)
+    
+    # 文件信息
+    size = Column(BigInteger, nullable=False)
+    hash_value = Column(String(64), index=True)
+    
+    # S3存储信息
+    s3_key = Column(String(500), nullable=False)
+    s3_etag = Column(String(100))
+    
+    # 时间戳
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<FileHistory(file_id='{self.file_id}', version='{self.version}')>"

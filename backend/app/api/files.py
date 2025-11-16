@@ -12,7 +12,7 @@ from datetime import datetime
 
 from app.services.storage import S3StorageService
 from app.models.database import get_db
-from app.models.file import File as FileModel
+from app.models.file import File as FileModel, FileHistory
 from app.utils.jwt_handler import get_current_user_id
 from sqlalchemy.orm import Session
 
@@ -31,6 +31,7 @@ class FileInfo(BaseModel):
     is_directory: bool
     created_at: datetime
     updated_at: datetime
+    version: int
     
     class Config:
         from_attributes = True
@@ -54,6 +55,21 @@ class DeleteResponse(BaseModel):
     success: bool
     message: str
 
+class FileHistoryInfo(BaseModel):
+    """文件历史信息"""
+    version: int
+    size: int
+    hash_value: Optional[str]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class RevertResponse(BaseModel):
+    """回滚响应"""
+    success: bool
+    message: str
+    file_info: FileInfo
 
 # 依赖注入
 def get_storage_service():
@@ -114,20 +130,54 @@ async def upload_file(
             raise HTTPException(status_code=500, detail=f"上传失败: {result.get('error')}")
         
         # 6. 保存元数据到数据库
-        db_file = FileModel(
-            user_id=user_id,
-            path=full_path,
-            filename=file.filename,
-            size=file_size,
-            content_type=file.content_type,
-            hash_value=hash_value,
-            s3_key=s3_key,
-            s3_etag=result.get('etag'),
-            is_directory=False
-        )
-        db.add(db_file)
-        db.commit()
-        db.refresh(db_file)
+        # 检查是否已存在同名文件
+        existing_file = db.query(FileModel).filter(
+            FileModel.user_id == user_id,
+            FileModel.path == full_path,
+            FileModel.is_directory == False
+        ).first()
+        
+        if existing_file:
+            # 文件已存在，保存旧版本到历史记录
+            file_history = FileHistory(
+                file_id=existing_file.id,
+                version=existing_file.version,
+                size=existing_file.size,
+                hash_value=existing_file.hash_value,
+                s3_key=existing_file.s3_key,
+                s3_etag=existing_file.s3_etag
+            )
+            db.add(file_history)
+            
+            # 更新现有文件记录
+            existing_file.size = file_size
+            existing_file.content_type = file.content_type
+            existing_file.hash_value = hash_value
+            existing_file.s3_key = s3_key
+            existing_file.s3_etag = result.get('etag')
+            existing_file.version += 1
+            existing_file.updated_at = datetime.utcnow()
+            
+            db.commit()
+            db.refresh(existing_file)
+            db_file = existing_file
+        else:
+            # 新文件
+            db_file = FileModel(
+                user_id=user_id,
+                path=full_path,
+                filename=file.filename,
+                size=file_size,
+                content_type=file.content_type,
+                hash_value=hash_value,
+                s3_key=s3_key,
+                s3_etag=result.get('etag'),
+                is_directory=False,
+                version=1
+            )
+            db.add(db_file)
+            db.commit()
+            db.refresh(db_file)
         
         # 7. 删除临时文件
         if temp_file_path and os.path.exists(temp_file_path):
@@ -332,3 +382,85 @@ async def get_file_info(
     
     return FileInfo.from_orm(db_file)
 
+@router.get("/history/{file_id}", response_model=List[FileHistoryInfo])
+async def get_file_history(
+    file_id: int,
+    db: Session = Depends(get_db),
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    获取文件历史版本
+    """
+    # 检查文件是否存在
+    db_file = db.query(FileModel).filter(
+        FileModel.id == file_id,
+        FileModel.user_id == user_id
+    ).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    history = db.query(FileHistory).filter(FileHistory.file_id == file_id).order_by(FileHistory.version.desc()).all()
+    
+    return [FileHistoryInfo.from_orm(h) for h in history]
+
+
+@router.post("/revert/{file_id}", response_model=RevertResponse)
+async def revert_file_version(
+    file_id: int,
+    version: int = Query(..., description="要回滚到的版本号"),
+    db: Session = Depends(get_db),
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    回滚文件到指定版本
+    """
+    # 1. 查找当前文件
+    db_file = db.query(FileModel).filter(
+        FileModel.id == file_id,
+        FileModel.user_id == user_id
+    ).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    # 2. 查找目标历史版本
+    history_version = db.query(FileHistory).filter(
+        FileHistory.file_id == file_id,
+        FileHistory.version == version
+    ).first()
+    if not history_version:
+        raise HTTPException(status_code=404, detail="历史版本不存在")
+
+    try:
+        # 3. 将当前版本存入历史记录
+        current_version_history = FileHistory(
+            file_id=db_file.id,
+            version=db_file.version,
+            size=db_file.size,
+            hash_value=db_file.hash_value,
+            s3_key=db_file.s3_key,
+            s3_etag=db_file.s3_etag
+        )
+        db.add(current_version_history)
+
+        # 4. 用历史版本覆盖当前文件记录
+        db_file.size = history_version.size
+        db_file.hash_value = history_version.hash_value
+        db_file.s3_key = history_version.s3_key
+        db_file.s3_etag = history_version.s3_etag
+        db_file.version += 1  # 版本号增加
+        db_file.updated_at = datetime.utcnow()
+
+        # 5. 从历史记录中删除已恢复的版本
+        db.delete(history_version)
+        
+        db.commit()
+        db.refresh(db_file)
+
+        return RevertResponse(
+            success=True,
+            message=f"成功回滚到版本 {version}",
+            file_info=FileInfo.from_orm(db_file)
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))

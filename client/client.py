@@ -108,7 +108,7 @@ class CloudDriveClient:
                 
                 if response.status_code == 200:
                     result = response.json()
-                    print(f"✓ 上传成功: {filename}")
+                    print(f"✓ 上传成功: {filename} (版本: {result.get('file_info', {}).get('version')})")
                     return result
                 else:
                     error_msg = response.json().get('detail', '未知错误')
@@ -217,13 +217,14 @@ class CloudDriveClient:
                 result = response.json()
                 files = result.get('files', [])
                 print(f"\n目录: {path}")
-                print(f"{'类型':<8} {'ID':<6} {'大小':<15} {'文件名'}")
+                print(f"{'类型':<8} {'ID':<6} {'版本':<6} {'大小':<15} {'文件名'}")
                 print("-" * 60)
                 
                 for file in files:
                     file_type = "📁 目录" if file['is_directory'] else "📄 文件"
                     size_str = "-" if file['is_directory'] else f"{file['size'] / 1024:.2f} KB"
-                    print(f"{file_type:<8} {file['id']:<6} {size_str:<15} {file['filename']}")
+                    version_str = f"v{file['version']}" if not file['is_directory'] else "-"
+                    print(f"{file_type:<8} {file['id']:<6} {version_str:<6} {size_str:<15} {file['filename']}")
                 
                 print(f"\n总计: {len(files)} 项")
                 return files
@@ -316,9 +317,11 @@ class CloudDriveClient:
                 print(f"  文件名: {info['filename']}")
                 print(f"  路径: {info['path']}")
                 print(f"  大小: {info['size'] / 1024 / 1024:.2f} MB")
+                print(f"  版本: {info['version']}")
                 print(f"  类型: {info.get('content_type', 'unknown')}")
                 print(f"  哈希: {info.get('hash_value', 'N/A')}")
                 print(f"  创建时间: {info['created_at']}")
+                print(f"  更新时间: {info['updated_at']}")
                 return info
             else:
                 error_msg = response.json().get('detail', '未知错误')
@@ -327,6 +330,62 @@ class CloudDriveClient:
                 
         except Exception as e:
             print(f"✗ 获取信息异常: {str(e)}")
+            return None
+
+    def get_file_history(self, file_id: int) -> Optional[List[Dict]]:
+        """
+        获取文件历史版本
+        """
+        url = f"{self.base_url}/api/files/history/{file_id}"
+        headers = self._get_headers()
+        
+        try:
+            response = self.session.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                history = response.json()
+                print(f"\n文件历史: ID={file_id}")
+                if not history:
+                    print("  无历史版本")
+                    return history
+                
+                print(f"  {'版本':<8} {'大小':<15} {'哈希':<20} {'创建时间'}")
+                print("  " + "-" * 60)
+                for h in history:
+                    size_str = f"{h['size'] / 1024:.2f} KB"
+                    hash_str = h.get('hash_value', 'N/A')[:16] + "..."
+                    print(f"  {h['version']:<8} {size_str:<15} {hash_str:<20} {h['created_at']}")
+                return history
+            else:
+                error_msg = response.json().get('detail', '未知错误')
+                print(f"✗ 获取历史失败: {error_msg}")
+                return None
+        except Exception as e:
+            print(f"✗ 获取历史异常: {str(e)}")
+            return None
+
+    def revert_file(self, file_id: int, version: int) -> Optional[Dict]:
+        """
+        回滚文件到指定版本
+        """
+        url = f"{self.base_url}/api/files/revert/{file_id}"
+        params = {"version": version}
+        headers = self._get_headers()
+        
+        try:
+            response = self.session.post(url, params=params, headers=headers)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✓ {result['message']}")
+                print(f"  新版本号: {result['file_info']['version']}")
+                return result
+            else:
+                error_msg = response.json().get('detail', '未知错误')
+                print(f"✗ 回滚失败: {error_msg}")
+                return None
+        except Exception as e:
+            print(f"✗ 回滚异常: {str(e)}")
             return None
 
 
@@ -443,10 +502,24 @@ def main():
         """获取文件信息"""
         client = CloudDriveClient()
         client.get_file_info(file_id)
+
+    @cli.command()
+    @click.argument('file_id', type=int)
+    def history(file_id):
+        """查看文件历史版本"""
+        client = CloudDriveClient()
+        client.get_file_history(file_id)
+
+    @cli.command()
+    @click.argument('file_id', type=int)
+    @click.argument('version', type=int)
+    def revert(file_id, version):
+        """回滚文件到指定版本"""
+        client = CloudDriveClient()
+        client.revert_file(file_id, version)
     
     cli()
 
 
 if __name__ == "__main__":
     main()
-
