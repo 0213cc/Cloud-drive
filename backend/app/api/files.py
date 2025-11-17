@@ -14,6 +14,7 @@ from app.services.storage import S3StorageService
 from app.models.database import get_db
 from app.models.file import File as FileModel, FileHistory
 from app.models.share import Share, SharePermission, ShareLog
+from app.models.user import User
 from app.utils.jwt_handler import get_current_user_id
 from sqlalchemy.orm import Session
 
@@ -123,6 +124,120 @@ def log_share_action(db: Session, share_id: int, user_id: int, action: str, deta
 
 
 # 用户认证通过JWT实现（已在jwt_handler.py中定义）
+
+
+@router.post("/update/{file_id}", response_model=UploadResponse)
+async def update_file(
+    file_id: int,
+    file: UploadFile = File(...),
+    base_version: Optional[int] = Query(None, description="The file version the update is based on for conflict detection"),
+    db: Session = Depends(get_db),
+    storage: S3StorageService = Depends(get_storage_service),
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    Update a file's content (uploads a new version).
+    - Supports updates by the file owner.
+    - Supports updates by shared users with 'write' permission.
+    - Handles conflicts by creating a new file if base_version does not match the current version.
+    """
+    # 1. Check for file existence and write permission for the user
+    existing_file, share = check_file_access(db, file_id, user_id, required_permission=SharePermission.WRITE)
+    
+    # 2. Conflict Detection
+    is_conflict = base_version is not None and base_version != existing_file.version
+
+    temp_file_path = None
+    try:
+        # 3. Save the uploaded file to a temporary location
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_file_path = temp_file.name
+            shutil.copyfileobj(file.file, temp_file)
+        
+        file_size = os.path.getsize(temp_file_path)
+        with open(temp_file_path, 'rb') as f:
+            hash_value = storage.calculate_file_hash(f)
+
+        # 4. Upload to S3
+        timestamp = int(datetime.utcnow().timestamp())
+        unique_filename = f"{timestamp}_{file.filename}"
+        owner_id = existing_file.user_id
+        clean_path = os.path.dirname(existing_file.path).strip('/')
+        s3_key = f"users/{owner_id}/{clean_path}/{unique_filename}" if clean_path else f"users/{owner_id}/{unique_filename}"
+
+        with open(temp_file_path, 'rb') as f:
+            result = storage.upload_file(f, s3_key, file_size, file.content_type)
+        
+        if not result['success']:
+            raise HTTPException(status_code=500, detail=f"Upload to S3 failed: {result.get('error')}")
+
+        # 5. Handle based on conflict status
+        if is_conflict:
+            # CONFLICT: Create a new file entry for the conflicted copy
+            user = db.query(User).filter(User.id == user_id).first()
+            username = user.username if user else "unknown_user"
+            name, ext = os.path.splitext(existing_file.filename)
+            conflict_filename = f"{name} (conflicted copy from {username} on {datetime.now().strftime('%Y-%m-%d')}){ext}"
+            conflict_full_path = os.path.join(os.path.dirname(existing_file.path), conflict_filename)
+
+            new_db_file = FileModel(
+                user_id=owner_id, # The original owner still owns the conflicted copy
+                path=conflict_full_path,
+                filename=conflict_filename,
+                size=file_size,
+                content_type=file.content_type,
+                hash_value=hash_value,
+                s3_key=s3_key,
+                s3_etag=result.get('etag'),
+                is_directory=False,
+                version=1
+            )
+            db.add(new_db_file)
+            db.commit()
+            db.refresh(new_db_file)
+            
+            message = f"Conflict detected. Your version was saved as '{conflict_filename}'."
+            final_file_info = new_db_file
+        else:
+            # NO CONFLICT: Update the existing file
+            file_history = FileHistory(
+                file_id=existing_file.id,
+                version=existing_file.version,
+                size=existing_file.size,
+                hash_value=existing_file.hash_value,
+                s3_key=existing_file.s3_key,
+                s3_etag=existing_file.s3_etag
+            )
+            db.add(file_history)
+            
+            existing_file.size = file_size
+            existing_file.content_type = file.content_type
+            existing_file.hash_value = hash_value
+            existing_file.s3_key = s3_key
+            existing_file.s3_etag = result.get('etag')
+            existing_file.version += 1
+            existing_file.updated_at = datetime.utcnow()
+            
+            db.commit()
+            db.refresh(existing_file)
+
+            if share:
+                log_share_action(db, share.id, user_id, "upload", f"uploaded new version: {file.filename}")
+            
+            message = "File updated successfully."
+            final_file_info = existing_file
+
+        return UploadResponse(
+            success=True,
+            message=message,
+            file_info=FileInfo.from_orm(final_file_info)
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
 
 
 @router.post("/upload", response_model=UploadResponse)

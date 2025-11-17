@@ -171,9 +171,93 @@ def test_share_functionality():
         return False
     
     print(f"✓ 删除被拒绝（符合预期）")
+
+    # ==================== 步骤 8a: Bob 尝试更新文件（应该成功）====================
+    print_section("步骤 8a: Bob 更新共享文件")
+
+    # Bob 创建一个新版本的文件
+    updated_file = "share_test_file_updated.txt"
+    with open(updated_file, 'w', encoding='utf-8') as f:
+        f.write(f"这是 Bob 更新后的文件内容\n更新时间: {datetime.now()}\n")
+
+    print(f"\nBob 尝试上传新版本 (文件ID: {file_id})...")
+    update_result_bob = bob_client.update_file(file_id, updated_file)
+    if not update_result_bob or not update_result_bob.get('success'):
+        print(f"✗ 更新失败（不应该失败！）")
+        os.remove(updated_file)
+        return False
     
-    # ==================== 步骤 8: Alice 更新共享权限为可写 ====================
-    print_section("步骤 8: Alice 更新共享权限为可写")
+    print(f"✓ Bob 更新文件成功 (新版本: {update_result_bob.get('file_info', {}).get('version')})")
+    os.remove(updated_file)
+
+    # ==================== 步骤 8b: Alice 验证文件内容已更新 ====================
+    print_section("步骤 8b: Alice 验证文件内容")
+
+    print(f"\nAlice 下载文件以验证 Bob 的更新...")
+    download_result_alice = alice_client.download_file(file_id, show_progress=False)
+    if not download_result_alice.get('success'):
+        print(f"✗ Alice 下载失败")
+        return False
+    
+    downloaded_path_alice = download_result_alice.get('path')
+    with open(downloaded_path_alice, 'r', encoding='utf-8') as f:
+        content = f.read()
+        if "Bob 更新后" in content:
+            print(f"✓ 文件内容已更新，验证成功！")
+        else:
+            print(f"✗ 文件内容未更新，验证失败！")
+            os.remove(downloaded_path_alice)
+            return False
+    os.remove(downloaded_path_alice)
+    
+    # ==================== 步骤 9: 测试文件更新冲突 ====================
+    print_section("步骤 9: 测试文件更新冲突")
+
+    # 此时, 文件版本为 2 (Alice 上传 v1, Bob 更新 v2)
+    # Alice 再次更新文件, 将版本变为 3
+    print("\nAlice 再次更新文件，制造版本冲突...")
+    alice_update_file = "alice_update_v3.txt"
+    with open(alice_update_file, 'w', encoding='utf-8') as f:
+        f.write("Alice's V3 content")
+    
+    update_result_alice = alice_client.update_file(file_id, alice_update_file)
+    if not update_result_alice or not update_result_alice.get('success'):
+        print("✗ Alice 更新 V3 失败")
+        os.remove(alice_update_file)
+        return False
+    os.remove(alice_update_file)
+    print("✓ Alice 更新成功，文件版本现在是 3")
+
+    # Bob 此时仍然基于版本 2 进行修改并尝试上传
+    print("\nBob 基于旧版本 V2 进行更新，应该会产生冲突...")
+    bob_conflict_file = "bob_conflict_update.txt"
+    with open(bob_conflict_file, 'w', encoding='utf-8') as f:
+        f.write("Bob's conflicting update")
+    
+    # We need to manually set the base_version for Bob's client to simulate the conflict
+    # For this test, we'll directly call the request with a stale version
+    url = f"{bob_client.base_url}/api/files/update/{file_id}"
+    params = {"base_version": 2} # Stale version
+    files = {'file': (os.path.basename(bob_conflict_file), open(bob_conflict_file, 'rb'))}
+    headers = bob_client._get_headers()
+    response = bob_client.session.post(url, files=files, params=params, headers=headers)
+    files['file'][1].close()
+    os.remove(bob_conflict_file)
+
+    if response.status_code == 200:
+        result = response.json()
+        if "Conflict detected" in result.get('message', ''):
+            print(f"✓ 冲突被成功检测到，并创建了冲突文件！")
+            print(f"  服务器消息: {result['message']}")
+        else:
+            print("✗ 冲突未被正确处理")
+            return False
+    else:
+        print(f"✗ 冲突更新请求失败: {response.text}")
+        return False
+
+    # ==================== 步骤 10: Alice 更新共享权限为可写 ====================
+    print_section("步骤 10: Alice 更新共享权限为可写")
     
     print(f"\n更新共享权限...")
     update_result = alice_client.update_share(share_id, permission="write")

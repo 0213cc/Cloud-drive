@@ -50,6 +50,81 @@ class CloudDriveClient:
         
         return headers
     
+    def update_file(
+        self, 
+        file_id: int,
+        file_path: str, 
+        show_progress: bool = True
+    ) -> Dict:
+        """
+        更新文件内容（上传新版本）
+        
+        Args:
+            file_id: 要更新的文件ID
+            file_path: 本地新文件路径
+            show_progress: 是否显示进度条
+            
+        Returns:
+            上传结果
+        """
+        if not os.path.exists(file_path):
+            return {"success": False, "error": "文件不存在"}
+
+        # Get the current version of the file for conflict detection
+        file_info = self.get_file_info(file_id, quiet=True)
+        if not file_info:
+            print(f"✗ Cannot update file: File with ID {file_id} not found or no access.")
+            return {"success": False, "error": "File not found or no access."}
+        base_version = file_info.get('version')
+        
+        file_size = os.path.getsize(file_path)
+        filename = os.path.basename(file_path)
+        
+        print(f"Updating file: {filename} (ID: {file_id}, base version: {base_version}) -> {file_size / 1024 / 1024:.2f} MB")
+        
+        url = f"{self.base_url}/api/files/update/{file_id}"
+        params = {"base_version": base_version}
+        
+        with open(file_path, 'rb') as f:
+            if show_progress:
+                progress_bar = tqdm(
+                    total=file_size,
+                    unit='B',
+                    unit_scale=True,
+                    desc=f"Updating {filename}"
+                )
+                
+                original_read = f.read
+                def read_with_progress(size=-1):
+                    data = original_read(size)
+                    progress_bar.update(len(data))
+                    return data
+                f.read = read_with_progress
+            
+            files = {'file': (filename, f)}
+            headers = self._get_headers()
+            
+            try:
+                response = self.session.post(url, files=files, params=params, headers=headers)
+                
+                if show_progress:
+                    progress_bar.close()
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    print(f"✓ {result['message']}")
+                    return result
+                else:
+                    error_msg = response.json().get('detail', 'Unknown error')
+                    print(f"✗ Update failed: {error_msg}")
+                    return {"success": False, "error": error_msg}
+                    
+            except Exception as e:
+                if show_progress:
+                    progress_bar.close()
+                print(f"✗ Update exception: {str(e)}")
+                return {"success": False, "error": str(e)}
+
     def upload_file(
         self, 
         file_path: str, 
@@ -294,12 +369,13 @@ class CloudDriveClient:
             print(f"✗ 创建目录异常: {str(e)}")
             return {"success": False, "error": str(e)}
     
-    def get_file_info(self, file_id: int) -> Optional[Dict]:
+    def get_file_info(self, file_id: int, quiet: bool = False) -> Optional[Dict]:
         """
         获取文件信息
         
         Args:
             file_id: 文件ID
+            quiet: If True, suppresses console output.
             
         Returns:
             文件信息
@@ -312,24 +388,27 @@ class CloudDriveClient:
             
             if response.status_code == 200:
                 info = response.json()
-                print(f"\n文件信息:")
-                print(f"  ID: {info['id']}")
-                print(f"  文件名: {info['filename']}")
-                print(f"  路径: {info['path']}")
-                print(f"  大小: {info['size'] / 1024 / 1024:.2f} MB")
-                print(f"  版本: {info['version']}")
-                print(f"  类型: {info.get('content_type', 'unknown')}")
-                print(f"  哈希: {info.get('hash_value', 'N/A')}")
-                print(f"  创建时间: {info['created_at']}")
-                print(f"  更新时间: {info['updated_at']}")
+                if not quiet:
+                    print(f"\n文件信息:")
+                    print(f"  ID: {info['id']}")
+                    print(f"  文件名: {info['filename']}")
+                    print(f"  路径: {info['path']}")
+                    print(f"  大小: {info['size'] / 1024 / 1024:.2f} MB")
+                    print(f"  版本: {info['version']}")
+                    print(f"  类型: {info.get('content_type', 'unknown')}")
+                    print(f"  哈希: {info.get('hash_value', 'N/A')}")
+                    print(f"  创建时间: {info['created_at']}")
+                    print(f"  更新时间: {info['updated_at']}")
                 return info
             else:
-                error_msg = response.json().get('detail', '未知错误')
-                print(f"✗ 获取信息失败: {error_msg}")
+                if not quiet:
+                    error_msg = response.json().get('detail', '未知错误')
+                    print(f"✗ 获取信息失败: {error_msg}")
                 return None
                 
         except Exception as e:
-            print(f"✗ 获取信息异常: {str(e)}")
+            if not quiet:
+                print(f"✗ 获取信息异常: {str(e)}")
             return None
 
     def get_file_history(self, file_id: int) -> Optional[List[Dict]]:
@@ -719,9 +798,17 @@ def main():
     @click.argument('file_path')
     @click.option('--path', default='/', help='远程目录路径')
     def upload(file_path, path):
-        """上传文件"""
+        """上传新文件"""
         client = CloudDriveClient()
         client.upload_file(file_path, path)
+
+    @cli.command()
+    @click.argument('file_id', type=int)
+    @click.argument('file_path', type=click.Path(exists=True))
+    def update(file_id, file_path):
+        """更新文件内容（上传新版本）"""
+        client = CloudDriveClient()
+        client.update_file(file_id, file_path)
     
     @cli.command()
     @click.argument('file_id', type=int)
