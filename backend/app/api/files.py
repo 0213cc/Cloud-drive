@@ -13,6 +13,7 @@ from datetime import datetime
 from app.services.storage import S3StorageService
 from app.models.database import get_db
 from app.models.file import File as FileModel, FileHistory
+from app.models.share import Share, SharePermission, ShareLog
 from app.utils.jwt_handler import get_current_user_id
 from sqlalchemy.orm import Session
 
@@ -75,6 +76,51 @@ class RevertResponse(BaseModel):
 def get_storage_service():
     """获取存储服务"""
     return S3StorageService()
+
+
+def check_file_access(db: Session, file_id: int, user_id: int, required_permission: SharePermission = SharePermission.READ) -> tuple:
+    """
+    检查用户是否有权限访问文件
+    返回: (文件对象, 共享对象或None)
+    """
+    # 1. 检查文件是否存在
+    db_file = db.query(FileModel).filter(FileModel.id == file_id).first()
+    if not db_file:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    
+    # 2. 检查是否是文件所有者
+    if db_file.user_id == user_id:
+        return db_file, None
+    
+    # 3. 检查是否有共享权限
+    share = db.query(Share).filter(
+        Share.file_id == file_id,
+        Share.shared_with_user_id == user_id,
+        Share.is_active == True
+    ).first()
+    
+    if not share or not share.is_valid():
+        raise HTTPException(status_code=403, detail="无权访问此文件")
+    
+    # 4. 检查权限级别
+    if required_permission == SharePermission.WRITE and share.permission != SharePermission.WRITE:
+        raise HTTPException(status_code=403, detail="无写入权限")
+    
+    return db_file, share
+
+
+def log_share_action(db: Session, share_id: int, user_id: int, action: str, details: str = None):
+    """记录共享操作日志"""
+    if share_id:
+        log = ShareLog(
+            share_id=share_id,
+            user_id=user_id,
+            action=action,
+            details=details
+        )
+        db.add(log)
+        db.commit()
+
 
 # 用户认证通过JWT实现（已在jwt_handler.py中定义）
 
@@ -205,14 +251,12 @@ async def download_file(
 ):
     """
     下载文件
-    """
-    db_file = db.query(FileModel).filter(
-        FileModel.id == file_id,
-        FileModel.user_id == user_id
-    ).first()
     
-    if not db_file:
-        raise HTTPException(status_code=404, detail="文件不存在")
+    - 支持下载自己的文件
+    - 支持下载共享给自己的文件（需要至少有读权限）
+    """
+    # 检查访问权限（支持共享文件）
+    db_file, share = check_file_access(db, file_id, user_id, SharePermission.READ)
     
     if db_file.is_directory:
         raise HTTPException(status_code=400, detail="不能下载目录")
@@ -224,6 +268,10 @@ async def download_file(
         
         if not result['success']:
             raise HTTPException(status_code=500, detail=f"下载失败: {result.get('error')}")
+        
+        # 记录共享文件的下载日志
+        if share:
+            log_share_action(db, share.id, user_id, "download", f"下载文件: {db_file.filename}")
         
         return FileResponse(
             path=temp_file_path,
@@ -273,6 +321,9 @@ async def delete_file(
 ):
     """
     删除文件
+    
+    - 只有文件所有者可以删除文件
+    - 共享用户即使有写权限也不能删除文件
     """
     db_file = db.query(FileModel).filter(
         FileModel.id == file_id,
@@ -280,7 +331,7 @@ async def delete_file(
     ).first()
     
     if not db_file:
-        raise HTTPException(status_code=404, detail="文件不存在")
+        raise HTTPException(status_code=404, detail="文件不存在或无权删除")
     
     try:
         # S3中的历史版本暂时不删除，可以作为备份
@@ -289,6 +340,9 @@ async def delete_file(
         if not result['success']:
             # 即使S3删除失败，也继续删除数据库记录
             pass
+        
+        # 删除相关的共享记录
+        db.query(Share).filter(Share.file_id == file_id).delete()
         
         db.delete(db_file)
         db.commit()
@@ -353,14 +407,16 @@ async def get_file_info(
 ):
     """
     获取文件信息
-    """
-    db_file = db.query(FileModel).filter(
-        FileModel.id == file_id,
-        FileModel.user_id == user_id
-    ).first()
     
-    if not db_file:
-        raise HTTPException(status_code=404, detail="文件不存在")
+    - 支持查看自己的文件
+    - 支持查看共享给自己的文件
+    """
+    # 检查访问权限（支持共享文件）
+    db_file, share = check_file_access(db, file_id, user_id, SharePermission.READ)
+    
+    # 记录共享文件的访问日志
+    if share:
+        log_share_action(db, share.id, user_id, "access", f"查看文件信息: {db_file.filename}")
     
     return FileInfo.from_orm(db_file)
 

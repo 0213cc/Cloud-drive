@@ -388,6 +388,262 @@ class CloudDriveClient:
             print(f"✗ 回滚异常: {str(e)}")
             return None
 
+    # ==================== 共享功能 ====================
+    
+    def create_share(
+        self, 
+        file_id: int, 
+        shared_with_username: str, 
+        permission: str = "read",
+        expires_at: Optional[str] = None
+    ) -> Optional[Dict]:
+        """
+        创建文件共享
+        
+        Args:
+            file_id: 文件ID
+            shared_with_username: 要分享给的用户名
+            permission: 权限 (read/write)
+            expires_at: 过期时间 (ISO格式，可选)
+            
+        Returns:
+            共享信息
+        """
+        url = f"{self.base_url}/api/share/create"
+        headers = self._get_headers()
+        
+        data = {
+            "file_id": file_id,
+            "shared_with_username": shared_with_username,
+            "permission": permission
+        }
+        
+        if expires_at:
+            data["expires_at"] = expires_at
+        
+        try:
+            response = self.session.post(url, json=data, headers=headers)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✓ {result['message']}")
+                share_info = result.get('share_info', {})
+                print(f"  共享ID: {share_info.get('id')}")
+                print(f"  文件: {share_info.get('filename')}")
+                print(f"  分享给: {share_info.get('shared_with_username')}")
+                print(f"  权限: {share_info.get('permission')}")
+                if share_info.get('expires_at'):
+                    print(f"  过期时间: {share_info.get('expires_at')}")
+                return result
+            else:
+                error_msg = response.json().get('detail', '未知错误')
+                print(f"✗ 创建共享失败: {error_msg}")
+                return None
+        except Exception as e:
+            print(f"✗ 创建共享异常: {str(e)}")
+            return None
+    
+    def list_my_shares(self) -> Optional[List[Dict]]:
+        """
+        列出我创建的所有共享
+        
+        Returns:
+            共享列表
+        """
+        url = f"{self.base_url}/api/share/my-shares"
+        headers = self._get_headers()
+        
+        try:
+            response = self.session.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                result = response.json()
+                shares = result.get('shares', [])
+                total = result.get('total', 0)
+                
+                print(f"\n我的共享 (共 {total} 项):")
+                if total == 0:
+                    print("  暂无共享")
+                    return []
+                
+                print(f"\n  {'ID':<6} {'文件名':<25} {'分享给':<15} {'权限':<8} {'状态':<8} {'过期时间'}")
+                print("  " + "-" * 90)
+                
+                for share in shares:
+                    share_id = share.get('id', 'N/A')
+                    filename = share.get('filename', 'N/A')[:23]
+                    shared_with = share.get('shared_with_username', 'N/A')[:13]
+                    permission = share.get('permission', 'N/A')
+                    status = "有效" if share.get('is_valid') else ("过期" if share.get('is_expired') else "禁用")
+                    expires = share.get('expires_at', '永久')[:19] if share.get('expires_at') else '永久'
+                    
+                    print(f"  {share_id:<6} {filename:<25} {shared_with:<15} {permission:<8} {status:<8} {expires}")
+                
+                return shares
+            else:
+                error_msg = response.json().get('detail', '未知错误')
+                print(f"✗ 获取共享列表失败: {error_msg}")
+                return None
+        except Exception as e:
+            print(f"✗ 获取共享列表异常: {str(e)}")
+            return None
+    
+    def list_shared_with_me(self) -> Optional[List[Dict]]:
+        """
+        列出分享给我的所有文件
+        
+        Returns:
+            共享列表
+        """
+        url = f"{self.base_url}/api/share/shared-with-me"
+        headers = self._get_headers()
+        
+        try:
+            response = self.session.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                result = response.json()
+                shares = result.get('shares', [])
+                total = result.get('total', 0)
+                
+                print(f"\n分享给我的文件 (共 {total} 项):")
+                if total == 0:
+                    print("  暂无共享文件")
+                    return []
+                
+                print(f"\n  {'ID':<6} {'文件名':<25} {'所有者':<15} {'权限':<8} {'文件ID':<8} {'过期时间'}")
+                print("  " + "-" * 90)
+                
+                for share in shares:
+                    share_id = share.get('id', 'N/A')
+                    filename = share.get('filename', 'N/A')[:23]
+                    owner = share.get('owner_username', 'N/A')[:13]
+                    permission = share.get('permission', 'N/A')
+                    file_id = share.get('file_id', 'N/A')
+                    expires = share.get('expires_at', '永久')[:19] if share.get('expires_at') else '永久'
+                    
+                    print(f"  {share_id:<6} {filename:<25} {owner:<15} {permission:<8} {file_id:<8} {expires}")
+                
+                return shares
+            else:
+                error_msg = response.json().get('detail', '未知错误')
+                print(f"✗ 获取共享列表失败: {error_msg}")
+                return None
+        except Exception as e:
+            print(f"✗ 获取共享列表异常: {str(e)}")
+            return None
+    
+    def update_share(
+        self, 
+        share_id: int, 
+        permission: Optional[str] = None,
+        is_active: Optional[bool] = None,
+        expires_at: Optional[str] = None
+    ) -> Optional[Dict]:
+        """
+        更新共享设置
+        
+        Args:
+            share_id: 共享ID
+            permission: 新权限 (read/write)
+            is_active: 是否启用
+            expires_at: 过期时间
+            
+        Returns:
+            更新结果
+        """
+        url = f"{self.base_url}/api/share/update/{share_id}"
+        headers = self._get_headers()
+        
+        data = {}
+        if permission is not None:
+            data["permission"] = permission
+        if is_active is not None:
+            data["is_active"] = is_active
+        if expires_at is not None:
+            data["expires_at"] = expires_at
+        
+        try:
+            response = self.session.put(url, json=data, headers=headers)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✓ {result['message']}")
+                return result
+            else:
+                error_msg = response.json().get('detail', '未知错误')
+                print(f"✗ 更新共享失败: {error_msg}")
+                return None
+        except Exception as e:
+            print(f"✗ 更新共享异常: {str(e)}")
+            return None
+    
+    def delete_share(self, share_id: int) -> Optional[Dict]:
+        """
+        删除共享
+        
+        Args:
+            share_id: 共享ID
+            
+        Returns:
+            删除结果
+        """
+        url = f"{self.base_url}/api/share/delete/{share_id}"
+        headers = self._get_headers()
+        
+        try:
+            response = self.session.delete(url, headers=headers)
+            
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✓ {result['message']}")
+                return result
+            else:
+                error_msg = response.json().get('detail', '未知错误')
+                print(f"✗ 删除共享失败: {error_msg}")
+                return None
+        except Exception as e:
+            print(f"✗ 删除共享异常: {str(e)}")
+            return None
+    
+    def get_share_info(self, share_id: int) -> Optional[Dict]:
+        """
+        获取共享详情
+        
+        Args:
+            share_id: 共享ID
+            
+        Returns:
+            共享信息
+        """
+        url = f"{self.base_url}/api/share/info/{share_id}"
+        headers = self._get_headers()
+        
+        try:
+            response = self.session.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                share = response.json()
+                print(f"\n共享详情:")
+                print(f"  共享ID: {share.get('id')}")
+                print(f"  文件: {share.get('filename')} (ID: {share.get('file_id')})")
+                print(f"  路径: {share.get('file_path')}")
+                print(f"  所有者: {share.get('owner_username')}")
+                print(f"  分享给: {share.get('shared_with_username')}")
+                print(f"  权限: {share.get('permission')}")
+                print(f"  状态: {'有效' if share.get('is_valid') else ('过期' if share.get('is_expired') else '禁用')}")
+                print(f"  创建时间: {share.get('created_at')}")
+                if share.get('expires_at'):
+                    print(f"  过期时间: {share.get('expires_at')}")
+                return share
+            else:
+                error_msg = response.json().get('detail', '未知错误')
+                print(f"✗ 获取共享信息失败: {error_msg}")
+                return None
+        except Exception as e:
+            print(f"✗ 获取共享信息异常: {str(e)}")
+            return None
+
 
 def main():
     """主函数 - 交互式命令行"""
@@ -517,6 +773,55 @@ def main():
         """回滚文件到指定版本"""
         client = CloudDriveClient()
         client.revert_file(file_id, version)
+    
+    # ==================== 共享命令 ====================
+    
+    @cli.command()
+    @click.argument('file_id', type=int)
+    @click.argument('username')
+    @click.option('--permission', type=click.Choice(['read', 'write']), default='read', help='权限 (read/write)')
+    @click.option('--expires', help='过期时间 (ISO格式，如: 2024-12-31T23:59:59)')
+    def share(file_id, username, permission, expires):
+        """创建文件共享"""
+        client = CloudDriveClient()
+        client.create_share(file_id, username, permission, expires)
+    
+    @cli.command()
+    def my_shares():
+        """列出我创建的所有共享"""
+        client = CloudDriveClient()
+        client.list_my_shares()
+    
+    @cli.command()
+    def shared_with_me():
+        """列出分享给我的所有文件"""
+        client = CloudDriveClient()
+        client.list_shared_with_me()
+    
+    @cli.command()
+    @click.argument('share_id', type=int)
+    def share_info(share_id):
+        """查看共享详情"""
+        client = CloudDriveClient()
+        client.get_share_info(share_id)
+    
+    @cli.command()
+    @click.argument('share_id', type=int)
+    @click.option('--permission', type=click.Choice(['read', 'write']), help='新权限')
+    @click.option('--active/--inactive', default=None, help='启用/禁用共享')
+    @click.option('--expires', help='过期时间 (ISO格式)')
+    def update_share(share_id, permission, active, expires):
+        """更新共享设置"""
+        client = CloudDriveClient()
+        client.update_share(share_id, permission, active, expires)
+    
+    @cli.command()
+    @click.argument('share_id', type=int)
+    @click.confirmation_option(prompt='确定要删除此共享吗?')
+    def unshare(share_id):
+        """删除共享"""
+        client = CloudDriveClient()
+        client.delete_share(share_id)
     
     cli()
 
