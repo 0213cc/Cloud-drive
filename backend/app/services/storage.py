@@ -1,9 +1,10 @@
 """
-S3存储服务 - 支持多线程上传下载
+S3存储服务 - 支持多线程上传下载和数据压缩
 """
 import boto3
 import os
 import hashlib
+import tempfile
 from typing import BinaryIO, Optional, List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from botocore.exceptions import ClientError

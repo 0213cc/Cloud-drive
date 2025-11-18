@@ -16,6 +16,7 @@ from app.models.file import File as FileModel, FileHistory
 from app.models.share import Share, SharePermission, ShareLog
 from app.models.user import User
 from app.utils.jwt_handler import get_current_user_id
+from app.utils.compression import CompressionService
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -31,6 +32,9 @@ class FileInfo(BaseModel):
     content_type: Optional[str]
     hash_value: Optional[str]
     is_directory: bool
+    is_compressed: Optional[bool] = False
+    compressed_size: Optional[int] = None
+    compression_ratio: Optional[int] = None
     created_at: datetime
     updated_at: datetime
     version: int
@@ -131,6 +135,7 @@ async def update_file(
     file_id: int,
     file: UploadFile = File(...),
     base_version: Optional[int] = Query(None, description="The file version the update is based on for conflict detection"),
+    enable_compression: bool = Query(True, description="是否启用压缩"),
     db: Session = Depends(get_db),
     storage: S3StorageService = Depends(get_storage_service),
     user_id: int = Depends(get_current_user_id)
@@ -140,6 +145,7 @@ async def update_file(
     - Supports updates by the file owner.
     - Supports updates by shared users with 'write' permission.
     - Handles conflicts by creating a new file if base_version does not match the current version.
+    - Supports compression to save storage and bandwidth.
     """
     # 1. Check for file existence and write permission for the user
     existing_file, share = check_file_access(db, file_id, user_id, required_permission=SharePermission.WRITE)
@@ -148,30 +154,62 @@ async def update_file(
     is_conflict = base_version is not None and base_version != existing_file.version
 
     temp_file_path = None
+    compressed_file_path = None
+    
     try:
         # 3. Save the uploaded file to a temporary location
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
             temp_file_path = temp_file.name
             shutil.copyfileobj(file.file, temp_file)
         
-        file_size = os.path.getsize(temp_file_path)
+        original_size = os.path.getsize(temp_file_path)
         with open(temp_file_path, 'rb') as f:
             hash_value = storage.calculate_file_hash(f)
 
-        # 4. Upload to S3
+        # 4. 判断是否需要压缩
+        should_compress = (
+            enable_compression and 
+            CompressionService.should_compress(original_size, file.content_type)
+        )
+        
+        is_compressed = False
+        compressed_size = original_size
+        compression_ratio = 0
+        upload_file_path = temp_file_path
+        
+        if should_compress:
+            compressed_file_path = tempfile.mktemp(suffix='.gz')
+            
+            with open(temp_file_path, 'rb') as input_f, open(compressed_file_path, 'wb') as output_f:
+                compress_result = CompressionService.compress_file(input_f, output_f)
+                
+                if compress_result['success']:
+                    is_compressed = True
+                    compressed_size = compress_result['compressed_size']
+                    compression_ratio = int(compress_result['compression_ratio'])
+                    upload_file_path = compressed_file_path
+
+        # 5. Upload to S3
         timestamp = int(datetime.utcnow().timestamp())
         unique_filename = f"{timestamp}_{file.filename}"
+        if is_compressed:
+            unique_filename += ".gz"
+        
         owner_id = existing_file.user_id
         clean_path = os.path.dirname(existing_file.path).strip('/')
         s3_key = f"users/{owner_id}/{clean_path}/{unique_filename}" if clean_path else f"users/{owner_id}/{unique_filename}"
 
-        with open(temp_file_path, 'rb') as f:
-            result = storage.upload_file(f, s3_key, file_size, file.content_type)
+        upload_size = compressed_size if is_compressed else original_size
+        with open(upload_file_path, 'rb') as f:
+            result = storage.upload_file(
+                f, s3_key, upload_size, 
+                'application/gzip' if is_compressed else file.content_type
+            )
         
         if not result['success']:
             raise HTTPException(status_code=500, detail=f"Upload to S3 failed: {result.get('error')}")
 
-        # 5. Handle based on conflict status
+        # 6. Handle based on conflict status
         if is_conflict:
             # CONFLICT: Create a new file entry for the conflicted copy
             user = db.query(User).filter(User.id == user_id).first()
@@ -181,14 +219,17 @@ async def update_file(
             conflict_full_path = os.path.join(os.path.dirname(existing_file.path), conflict_filename)
 
             new_db_file = FileModel(
-                user_id=owner_id, # The original owner still owns the conflicted copy
+                user_id=owner_id,
                 path=conflict_full_path,
                 filename=conflict_filename,
-                size=file_size,
+                size=original_size,
                 content_type=file.content_type,
                 hash_value=hash_value,
                 s3_key=s3_key,
                 s3_etag=result.get('etag'),
+                is_compressed=is_compressed,
+                compressed_size=compressed_size if is_compressed else None,
+                compression_ratio=compression_ratio if is_compressed else None,
                 is_directory=False,
                 version=1
             )
@@ -206,15 +247,20 @@ async def update_file(
                 size=existing_file.size,
                 hash_value=existing_file.hash_value,
                 s3_key=existing_file.s3_key,
-                s3_etag=existing_file.s3_etag
+                s3_etag=existing_file.s3_etag,
+                is_compressed=existing_file.is_compressed,
+                compressed_size=existing_file.compressed_size
             )
             db.add(file_history)
             
-            existing_file.size = file_size
+            existing_file.size = original_size
             existing_file.content_type = file.content_type
             existing_file.hash_value = hash_value
             existing_file.s3_key = s3_key
             existing_file.s3_etag = result.get('etag')
+            existing_file.is_compressed = is_compressed
+            existing_file.compressed_size = compressed_size if is_compressed else None
+            existing_file.compression_ratio = compression_ratio if is_compressed else None
             existing_file.version += 1
             existing_file.updated_at = datetime.utcnow()
             
@@ -225,6 +271,8 @@ async def update_file(
                 log_share_action(db, share.id, user_id, "upload", f"uploaded new version: {file.filename}")
             
             message = "File updated successfully."
+            if is_compressed:
+                message += f" (compressed, saved {compression_ratio}% space)"
             final_file_info = existing_file
 
         return UploadResponse(
@@ -238,12 +286,15 @@ async def update_file(
     finally:
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+        if compressed_file_path and os.path.exists(compressed_file_path):
+            os.remove(compressed_file_path)
 
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_file(
     file: UploadFile = File(...),
     path: str = Query("/", description="上传路径（目录）"),
+    enable_compression: bool = Query(True, description="是否启用压缩"),
     db: Session = Depends(get_db),
     storage: S3StorageService = Depends(get_storage_service),
     user_id: int = Depends(get_current_user_id)
@@ -253,24 +304,63 @@ async def upload_file(
     
     - 支持多线程上传大文件
     - 自动计算文件哈希
+    - 支持自动压缩（GZIP）以节省存储空间和网络流量
     """
+    temp_file_path = None
+    compressed_file_path = None
+    
     try:
         # 1. 保存临时文件
-        temp_file_path = None
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
             temp_file_path = temp_file.name
             shutil.copyfileobj(file.file, temp_file)
         
-        # 2. 获取文件大小
-        file_size = os.path.getsize(temp_file_path)
+        # 2. 获取原始文件大小
+        original_size = os.path.getsize(temp_file_path)
         
-        # 3. 计算哈希值
+        # 3. 计算原始文件哈希值
         with open(temp_file_path, 'rb') as f:
             hash_value = storage.calculate_file_hash(f)
         
-        # 4. 生成唯一的S3键
+        # 4. 判断是否需要压缩
+        should_compress = (
+            enable_compression and 
+            CompressionService.should_compress(original_size, file.content_type)
+        )
+        
+        is_compressed = False
+        compressed_size = original_size
+        compression_ratio = 0
+        upload_file_path = temp_file_path
+        
+        if should_compress:
+            # 压缩文件
+            compressed_file_path = tempfile.mktemp(suffix='.gz')
+            
+            with open(temp_file_path, 'rb') as input_f, open(compressed_file_path, 'wb') as output_f:
+                compress_result = CompressionService.compress_file(input_f, output_f)
+                
+                if compress_result['success']:
+                    is_compressed = True
+                    compressed_size = compress_result['compressed_size']
+                    compression_ratio = int(compress_result['compression_ratio'])
+                    upload_file_path = compressed_file_path
+                    
+                    logger.info(
+                        f"文件已压缩: {file.filename}, "
+                        f"原始: {original_size / 1024 / 1024:.2f} MB, "
+                        f"压缩后: {compressed_size / 1024 / 1024:.2f} MB, "
+                        f"压缩率: {compression_ratio}%"
+                    )
+                else:
+                    logger.warning(f"压缩失败，使用原始文件: {compress_result.get('error')}")
+        
+        # 5. 生成唯一的S3键
         timestamp = int(datetime.utcnow().timestamp())
         unique_filename = f"{timestamp}_{file.filename}"
+        if is_compressed:
+            unique_filename += ".gz"
+        
         clean_path = path.strip('/').strip()
         
         if clean_path:
@@ -280,19 +370,21 @@ async def upload_file(
             s3_key = f"users/{user_id}/{unique_filename}"
             full_path = f"/{file.filename}"
         
-        # 5. 上传到S3
-        with open(temp_file_path, 'rb') as f:
+        # 6. 上传到S3（上传压缩后的文件或原始文件）
+        upload_size = compressed_size if is_compressed else original_size
+        
+        with open(upload_file_path, 'rb') as f:
             result = storage.upload_file(
                 f, 
                 s3_key, 
-                file_size,
-                file.content_type
+                upload_size,
+                'application/gzip' if is_compressed else file.content_type
             )
         
         if not result['success']:
             raise HTTPException(status_code=500, detail=f"上传失败: {result.get('error')}")
         
-        # 6. 保存元数据到数据库
+        # 7. 保存元数据到数据库
         existing_file = db.query(FileModel).filter(
             FileModel.user_id == user_id,
             FileModel.path == full_path,
@@ -307,16 +399,21 @@ async def upload_file(
                 size=existing_file.size,
                 hash_value=existing_file.hash_value,
                 s3_key=existing_file.s3_key,
-                s3_etag=existing_file.s3_etag
+                s3_etag=existing_file.s3_etag,
+                is_compressed=existing_file.is_compressed,
+                compressed_size=existing_file.compressed_size
             )
             db.add(file_history)
             
             # 更新现有文件记录
-            existing_file.size = file_size
+            existing_file.size = original_size
             existing_file.content_type = file.content_type
             existing_file.hash_value = hash_value
             existing_file.s3_key = s3_key
             existing_file.s3_etag = result.get('etag')
+            existing_file.is_compressed = is_compressed
+            existing_file.compressed_size = compressed_size if is_compressed else None
+            existing_file.compression_ratio = compression_ratio if is_compressed else None
             existing_file.version += 1
             existing_file.updated_at = datetime.utcnow()
             
@@ -329,11 +426,14 @@ async def upload_file(
                 user_id=user_id,
                 path=full_path,
                 filename=file.filename,
-                size=file_size,
+                size=original_size,
                 content_type=file.content_type,
                 hash_value=hash_value,
                 s3_key=s3_key,
                 s3_etag=result.get('etag'),
+                is_compressed=is_compressed,
+                compressed_size=compressed_size if is_compressed else None,
+                compression_ratio=compression_ratio if is_compressed else None,
                 is_directory=False,
                 version=1
             )
@@ -341,19 +441,27 @@ async def upload_file(
             db.commit()
             db.refresh(db_file)
         
-        # 7. 删除临时文件
+        # 8. 删除临时文件
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+        if compressed_file_path and os.path.exists(compressed_file_path):
+            os.remove(compressed_file_path)
+        
+        message = "上传成功"
+        if is_compressed:
+            message += f"（已压缩，节省 {compression_ratio}% 空间）"
         
         return UploadResponse(
             success=True,
-            message="上传成功",
+            message=message,
             file_info=FileInfo.from_orm(db_file)
         )
         
     except Exception as e:
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+        if compressed_file_path and os.path.exists(compressed_file_path):
+            os.remove(compressed_file_path)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -369,6 +477,7 @@ async def download_file(
     
     - 支持下载自己的文件
     - 支持下载共享给自己的文件（需要至少有读权限）
+    - 自动解压缩文件
     """
     # 检查访问权限（支持共享文件）
     db_file, share = check_file_access(db, file_id, user_id, SharePermission.READ)
@@ -376,28 +485,55 @@ async def download_file(
     if db_file.is_directory:
         raise HTTPException(status_code=400, detail="不能下载目录")
     
-    temp_file_path = tempfile.mktemp(suffix=f"_{db_file.filename}")
+    compressed_file_path = None
+    decompressed_file_path = None
     
     try:
-        result = storage.download_file(db_file.s3_key, temp_file_path)
+        # 1. 从S3下载文件（可能是压缩的）
+        compressed_file_path = tempfile.mktemp(suffix=".download")
+        
+        result = storage.download_file(db_file.s3_key, compressed_file_path)
         
         if not result['success']:
             raise HTTPException(status_code=500, detail=f"下载失败: {result.get('error')}")
         
-        # 记录共享文件的下载日志
+        # 2. 如果文件是压缩的，需要解压
+        if db_file.is_compressed:
+            decompressed_file_path = tempfile.mktemp(suffix=f"_{db_file.filename}")
+            
+            with open(compressed_file_path, 'rb') as input_f, open(decompressed_file_path, 'wb') as output_f:
+                decompress_result = CompressionService.decompress_file(input_f, output_f)
+                
+                if not decompress_result['success']:
+                    raise HTTPException(status_code=500, detail=f"解压失败: {decompress_result.get('error')}")
+            
+            # 删除压缩文件，使用解压后的文件
+            if os.path.exists(compressed_file_path):
+                os.remove(compressed_file_path)
+            
+            final_file_path = decompressed_file_path
+            logger.info(f"文件已解压: {db_file.filename}")
+        else:
+            final_file_path = compressed_file_path
+        
+        # 3. 记录共享文件的下载日志
         if share:
             log_share_action(db, share.id, user_id, "download", f"下载文件: {db_file.filename}")
         
+        # 4. 返回文件
         return FileResponse(
-            path=temp_file_path,
+            path=final_file_path,
             filename=db_file.filename,
             media_type=db_file.content_type or 'application/octet-stream',
             background=None
         )
         
     except Exception as e:
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+        # 清理临时文件
+        if compressed_file_path and os.path.exists(compressed_file_path):
+            os.remove(compressed_file_path)
+        if decompressed_file_path and os.path.exists(decompressed_file_path):
+            os.remove(decompressed_file_path)
         raise HTTPException(status_code=500, detail=str(e))
 
 

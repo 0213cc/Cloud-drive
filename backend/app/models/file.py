@@ -18,9 +18,14 @@ class File(Base):
     filename = Column(String(255), nullable=False)
     
     # 文件信息
-    size = Column(BigInteger, nullable=False)  # 原始大小
+    size = Column(BigInteger, nullable=False)  # 原始大小（未压缩）
     content_type = Column(String(100))
-    hash_value = Column(String(64), index=True)  # SHA-256
+    hash_value = Column(String(64), index=True)  # SHA-256（原始文件的哈希）
+    
+    # 压缩信息
+    is_compressed = Column(Boolean, default=False)  # 是否压缩存储
+    compressed_size = Column(BigInteger)  # 压缩后大小
+    compression_ratio = Column(Integer)  # 压缩率（百分比）
     
     # S3存储信息
     s3_key = Column(String(500), nullable=False)  # S3对象键
@@ -48,6 +53,10 @@ class FileHistory(Base):
     # 文件信息
     size = Column(BigInteger, nullable=False)
     hash_value = Column(String(64), index=True)
+    
+    # 压缩信息
+    is_compressed = Column(Boolean, default=False)
+    compressed_size = Column(BigInteger)
     
     # S3存储信息
     s3_key = Column(String(500), nullable=False)
