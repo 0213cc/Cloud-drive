@@ -14,10 +14,12 @@ from datetime import datetime
 from app.services.storage import S3StorageService
 from app.models.database import get_db
 from app.models.file import File as FileModel, FileHistory
+from app.models.file_chunk import FileChunk
 from app.models.share import Share, SharePermission, ShareLog
 from app.models.user import User
 from app.utils.jwt_handler import get_current_user_id
 from app.utils.compression import CompressionService
+from app.utils.deduplication import DeduplicationService
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -219,7 +221,31 @@ async def update_file(
         if not result['success']:
             raise HTTPException(status_code=500, detail=f"Upload to S3 failed: {result.get('error')}")
 
-        # 6. Handle based on conflict status
+        # 6. 创建或获取文件块（去重）
+        chunk = DeduplicationService.check_duplicate(db, hash_value)
+        
+        if chunk:
+            # 文件块已存在，增加引用计数
+            DeduplicationService.increment_reference(db, chunk)
+            logger.info(
+                f"使用已存在的文件块: chunk_id={chunk.id}, "
+                f"hash={hash_value[:16]}..., refs={chunk.reference_count}"
+            )
+        else:
+            # 创建新的文件块
+            chunk = DeduplicationService.create_chunk(
+                db=db,
+                hash_value=hash_value,
+                size=original_size,
+                s3_key=s3_key,
+                s3_etag=result.get('etag'),
+                is_compressed=is_compressed,
+                compressed_size=compressed_size if is_compressed else None,
+                compression_ratio=compression_ratio if is_compressed else None,
+                stored_content_type='application/gzip' if is_compressed else file.content_type
+            )
+
+        # 7. Handle based on conflict status
         if is_conflict:
             # CONFLICT: Create a new file entry for the conflicted copy
             user = db.query(User).filter(User.id == user_id).first()
@@ -235,6 +261,7 @@ async def update_file(
                 size=original_size,
                 content_type=file.content_type,
                 hash_value=hash_value,
+                chunk_id=chunk.id,
                 s3_key=s3_key,
                 s3_etag=result.get('etag'),
                 is_compressed=is_compressed,
@@ -251,11 +278,14 @@ async def update_file(
             final_file_info = new_db_file
         else:
             # NO CONFLICT: Update the existing file
+            old_chunk_id = existing_file.chunk_id
+            
             file_history = FileHistory(
                 file_id=existing_file.id,
                 version=existing_file.version,
                 size=existing_file.size,
                 hash_value=existing_file.hash_value,
+                chunk_id=old_chunk_id,
                 s3_key=existing_file.s3_key,
                 s3_etag=existing_file.s3_etag,
                 is_compressed=existing_file.is_compressed,
@@ -263,9 +293,14 @@ async def update_file(
             )
             db.add(file_history)
             
+            # 如果旧版本有chunk_id，减少其引用计数
+            if old_chunk_id and old_chunk_id != chunk.id:
+                DeduplicationService.decrement_reference(db, old_chunk_id, storage)
+            
             existing_file.size = original_size
             existing_file.content_type = file.content_type
             existing_file.hash_value = hash_value
+            existing_file.chunk_id = chunk.id
             existing_file.s3_key = s3_key
             existing_file.s3_etag = result.get('etag')
             existing_file.is_compressed = is_compressed
@@ -300,6 +335,149 @@ async def update_file(
             os.remove(compressed_file_path)
 
 
+@router.post("/upload-by-reference", response_model=UploadResponse)
+async def upload_file_by_reference(
+    filename: str = Query(..., description="文件名"),
+    path: str = Query("/", description="上传路径（目录）"),
+    chunk_id: int = Query(..., description="已存在的文件块ID"),
+    size: int = Query(..., description="文件大小"),
+    hash_value: str = Query(..., description="文件哈希值"),
+    content_type: Optional[str] = Query(None, description="文件类型"),
+    db: Session = Depends(get_db),
+    user_id: int = Depends(get_current_user_id)
+):
+    """
+    通过引用已存在的文件块创建文件（去重上传）
+    
+    当客户端检测到文件已存在时，调用此接口直接创建文件记录，
+    无需重复上传文件内容，节省带宽和存储空间。
+    
+    Args:
+        filename: 文件名
+        path: 上传路径
+        chunk_id: 已存在的文件块ID
+        size: 文件大小
+        hash_value: 文件哈希值
+        content_type: 文件类型
+        
+    Returns:
+        上传结果
+    """
+    try:
+        # 1. 验证文件块是否存在
+        chunk = db.query(FileChunk).filter(FileChunk.id == chunk_id).first()
+        if not chunk:
+            raise HTTPException(status_code=404, detail="文件块不存在")
+        
+        # 2. 验证哈希值是否匹配
+        if chunk.hash_value != hash_value:
+            raise HTTPException(status_code=400, detail="文件哈希值不匹配")
+        
+        # 3. 构建完整路径
+        clean_path = path.strip('/').strip()
+        if clean_path:
+            full_path = f"/{clean_path}/{filename}"
+        else:
+            full_path = f"/{filename}"
+        
+        # 4. 检查文件是否已存在
+        existing_file = db.query(FileModel).filter(
+            FileModel.user_id == user_id,
+            FileModel.path == full_path,
+            FileModel.is_directory == False
+        ).first()
+        
+        if existing_file:
+            # 文件已存在，保存旧版本到历史记录
+            old_chunk_id = existing_file.chunk_id
+            
+            file_history = FileHistory(
+                file_id=existing_file.id,
+                version=existing_file.version,
+                size=existing_file.size,
+                hash_value=existing_file.hash_value,
+                chunk_id=old_chunk_id,
+                s3_key=existing_file.s3_key,
+                s3_etag=existing_file.s3_etag,
+                is_compressed=existing_file.is_compressed,
+                compressed_size=existing_file.compressed_size
+            )
+            db.add(file_history)
+            
+            # 如果旧版本有chunk_id，减少其引用计数
+            if old_chunk_id:
+                DeduplicationService.decrement_reference(db, old_chunk_id, None)
+            
+            # 更新现有文件记录
+            existing_file.size = size
+            existing_file.content_type = content_type
+            existing_file.hash_value = hash_value
+            existing_file.chunk_id = chunk_id
+            existing_file.s3_key = chunk.s3_key
+            existing_file.s3_etag = chunk.s3_etag
+            existing_file.is_compressed = chunk.is_compressed
+            existing_file.compressed_size = chunk.compressed_size
+            existing_file.compression_ratio = chunk.compression_ratio
+            existing_file.version += 1
+            existing_file.updated_at = datetime.utcnow()
+            
+            # 增加新chunk的引用计数
+            DeduplicationService.increment_reference(db, chunk)
+            
+            db.commit()
+            db.refresh(existing_file)
+            db_file = existing_file
+            
+            message = f"文件已更新（版本 {db_file.version}，通过去重）"
+        else:
+            # 新文件，直接创建引用
+            db_file = FileModel(
+                user_id=user_id,
+                path=full_path,
+                filename=filename,
+                size=size,
+                content_type=content_type,
+                hash_value=hash_value,
+                chunk_id=chunk_id,
+                s3_key=chunk.s3_key,
+                s3_etag=chunk.s3_etag,
+                is_compressed=chunk.is_compressed,
+                compressed_size=chunk.compressed_size,
+                compression_ratio=chunk.compression_ratio,
+                is_directory=False,
+                version=1
+            )
+            db.add(db_file)
+            
+            # 增加chunk的引用计数
+            DeduplicationService.increment_reference(db, chunk)
+            
+            db.commit()
+            db.refresh(db_file)
+            
+            message = "文件上传成功（通过去重，无需传输数据）"
+        
+        logger.info(
+            f"用户 {user_id} 通过去重创建文件: {full_path}, "
+            f"chunk_id={chunk_id}, refs={chunk.reference_count}"
+        )
+        
+        if chunk.is_compressed:
+            message += f"（已压缩，节省 {chunk.compression_ratio}% 空间）"
+        
+        return UploadResponse(
+            success=True,
+            message=message,
+            file_info=FileInfo.from_orm(db_file)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"通过引用上传文件失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/upload", response_model=UploadResponse)
 async def upload_file(
     file: UploadFile = File(...),
@@ -315,6 +493,13 @@ async def upload_file(
     - 支持多线程上传大文件
     - 自动计算文件哈希
     - 支持自动压缩（GZIP）以节省存储空间和网络流量
+    - 支持文件级去重（通过chunk_id）
+    
+    建议流程：
+    1. 客户端先计算文件哈希
+    2. 调用 /api/deduplication/check 检查文件是否已存在
+    3. 如果存在，调用 /api/files/upload-by-reference 创建引用
+    4. 如果不存在，调用此接口上传文件
     """
     temp_file_path = None
     compressed_file_path = None
@@ -394,7 +579,31 @@ async def upload_file(
         if not result['success']:
             raise HTTPException(status_code=500, detail=f"上传失败: {result.get('error')}")
         
-        # 7. 保存元数据到数据库
+        # 7. 创建或获取文件块（去重）
+        chunk = DeduplicationService.check_duplicate(db, hash_value)
+        
+        if chunk:
+            # 文件块已存在，增加引用计数
+            DeduplicationService.increment_reference(db, chunk)
+            logger.info(
+                f"使用已存在的文件块: chunk_id={chunk.id}, "
+                f"hash={hash_value[:16]}..., refs={chunk.reference_count}"
+            )
+        else:
+            # 创建新的文件块
+            chunk = DeduplicationService.create_chunk(
+                db=db,
+                hash_value=hash_value,
+                size=original_size,
+                s3_key=s3_key,
+                s3_etag=result.get('etag'),
+                is_compressed=is_compressed,
+                compressed_size=compressed_size if is_compressed else None,
+                compression_ratio=compression_ratio if is_compressed else None,
+                stored_content_type='application/gzip' if is_compressed else file.content_type
+            )
+        
+        # 8. 保存元数据到数据库
         existing_file = db.query(FileModel).filter(
             FileModel.user_id == user_id,
             FileModel.path == full_path,
@@ -403,11 +612,14 @@ async def upload_file(
         
         if existing_file:
             # 文件已存在，保存旧版本到历史记录
+            old_chunk_id = existing_file.chunk_id
+            
             file_history = FileHistory(
                 file_id=existing_file.id,
                 version=existing_file.version,
                 size=existing_file.size,
                 hash_value=existing_file.hash_value,
+                chunk_id=old_chunk_id,
                 s3_key=existing_file.s3_key,
                 s3_etag=existing_file.s3_etag,
                 is_compressed=existing_file.is_compressed,
@@ -415,10 +627,15 @@ async def upload_file(
             )
             db.add(file_history)
             
+            # 如果旧版本有chunk_id，减少其引用计数
+            if old_chunk_id and old_chunk_id != chunk.id:
+                DeduplicationService.decrement_reference(db, old_chunk_id, storage)
+            
             # 更新现有文件记录
             existing_file.size = original_size
             existing_file.content_type = file.content_type
             existing_file.hash_value = hash_value
+            existing_file.chunk_id = chunk.id
             existing_file.s3_key = s3_key
             existing_file.s3_etag = result.get('etag')
             existing_file.is_compressed = is_compressed
@@ -439,6 +656,7 @@ async def upload_file(
                 size=original_size,
                 content_type=file.content_type,
                 hash_value=hash_value,
+                chunk_id=chunk.id,
                 s3_key=s3_key,
                 s3_etag=result.get('etag'),
                 is_compressed=is_compressed,

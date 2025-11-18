@@ -22,12 +22,15 @@ class File(Base):
     content_type = Column(String(100))
     hash_value = Column(String(64), index=True)  # SHA-256（原始文件的哈希）
     
-    # 压缩信息
+    # 文件去重 - 指向实际存储的文件块
+    chunk_id = Column(Integer, ForeignKey("file_chunks.id"), nullable=True, index=True)
+    
+    # 压缩信息（从chunk_id引用的FileChunk获取，这里保留用于快速查询）
     is_compressed = Column(Boolean, default=False)  # 是否压缩存储
     compressed_size = Column(BigInteger)  # 压缩后大小
     compression_ratio = Column(Integer)  # 压缩率（百分比）
     
-    # S3存储信息
+    # S3存储信息（从chunk_id引用的FileChunk获取，这里保留用于快速查询）
     s3_key = Column(String(500), nullable=False)  # S3对象键
     s3_etag = Column(String(100))  # S3 ETag
     
@@ -53,6 +56,9 @@ class FileHistory(Base):
     # 文件信息
     size = Column(BigInteger, nullable=False)
     hash_value = Column(String(64), index=True)
+    
+    # 文件去重 - 指向实际存储的文件块
+    chunk_id = Column(Integer, ForeignKey("file_chunks.id"), nullable=True, index=True)
     
     # 压缩信息
     is_compressed = Column(Boolean, default=False)

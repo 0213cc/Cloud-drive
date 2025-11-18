@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from config import config
 from auth_client import AuthClient
+from dedup_client import DeduplicationClient
 
 
 class CloudDriveClient:
@@ -135,7 +136,8 @@ class CloudDriveClient:
         file_path: str, 
         remote_path: str = "/",
         show_progress: bool = True,
-        enable_compression: bool = True
+        enable_compression: bool = True,
+        enable_deduplication: bool = True
     ) -> Dict:
         """
         上传文件
@@ -145,6 +147,7 @@ class CloudDriveClient:
             remote_path: 远程目录路径
             show_progress: 是否显示进度条
             enable_compression: 是否启用压缩（默认True）
+            enable_deduplication: 是否启用去重（默认True）
             
         Returns:
             上传结果
@@ -157,6 +160,58 @@ class CloudDriveClient:
         
         print(f"上传文件: {filename} ({file_size / 1024 / 1024:.2f} MB)")
         
+        # 如果启用去重，先检查文件是否已存在
+        if enable_deduplication:
+            print("计算文件哈希...")
+            hash_value = DeduplicationClient.calculate_file_hash(file_path)
+            
+            print("检查文件是否已存在...")
+            headers = self._get_headers()
+            duplicate_info = DeduplicationClient.check_duplicate(
+                self.session,
+                self.base_url,
+                hash_value,
+                file_size,
+                headers
+            )
+            
+            if duplicate_info and duplicate_info.get('exists'):
+                # 文件已存在，通过引用上传
+                print(f"✓ 文件已存在（被引用{duplicate_info.get('reference_count')}次），跳过上传")
+                
+                # 获取文件类型
+                import mimetypes
+                content_type, _ = mimetypes.guess_type(filename)
+                
+                result = DeduplicationClient.upload_by_reference(
+                    self.session,
+                    self.base_url,
+                    filename,
+                    remote_path,
+                    duplicate_info['chunk_id'],
+                    file_size,
+                    hash_value,
+                    content_type,
+                    headers
+                )
+                
+                if result.get('success'):
+                    api_result = result['result']
+                    file_info = api_result.get('file_info', {})
+                    version = file_info.get('version', 1)
+                    
+                    print(f"✓ {api_result.get('message')} (版本: {version})")
+                    
+                    if duplicate_info.get('is_compressed'):
+                        print(f"  文件已压缩，压缩率: {duplicate_info.get('compression_ratio')}%")
+                    
+                    return api_result
+                else:
+                    print(f"✗ 通过去重上传失败: {result.get('error')}")
+                    print("  尝试常规上传...")
+                    # 继续执行常规上传
+        
+        # 常规上传
         url = f"{self.base_url}/api/files/upload"
         
         # 准备文件
