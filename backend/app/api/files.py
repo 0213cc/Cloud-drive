@@ -175,6 +175,13 @@ async def update_file(
             CompressionService.should_compress(original_size, file.content_type)
         )
         
+        logger.info(
+            f"压缩检查: enable_compression={enable_compression}, "
+            f"file_size={original_size / 1024 / 1024:.2f} MB, "
+            f"content_type={file.content_type}, "
+            f"should_compress={should_compress}"
+        )
+        
         is_compressed = False
         compressed_size = original_size
         compression_ratio = 0

@@ -54,7 +54,8 @@ class CloudDriveClient:
         self, 
         file_id: int,
         file_path: str, 
-        show_progress: bool = True
+        show_progress: bool = True,
+        enable_compression: bool = True
     ) -> Dict:
         """
         更新文件内容（上传新版本）
@@ -63,6 +64,7 @@ class CloudDriveClient:
             file_id: 要更新的文件ID
             file_path: 本地新文件路径
             show_progress: 是否显示进度条
+            enable_compression: 是否启用压缩（默认True）
             
         Returns:
             上传结果
@@ -83,7 +85,10 @@ class CloudDriveClient:
         print(f"Updating file: {filename} (ID: {file_id}, base version: {base_version}) -> {file_size / 1024 / 1024:.2f} MB")
         
         url = f"{self.base_url}/api/files/update/{file_id}"
-        params = {"base_version": base_version}
+        params = {
+            "base_version": base_version,
+            "enable_compression": enable_compression
+        }
         
         with open(file_path, 'rb') as f:
             if show_progress:
@@ -129,7 +134,8 @@ class CloudDriveClient:
         self, 
         file_path: str, 
         remote_path: str = "/",
-        show_progress: bool = True
+        show_progress: bool = True,
+        enable_compression: bool = True
     ) -> Dict:
         """
         上传文件
@@ -138,6 +144,7 @@ class CloudDriveClient:
             file_path: 本地文件路径
             remote_path: 远程目录路径
             show_progress: 是否显示进度条
+            enable_compression: 是否启用压缩（默认True）
             
         Returns:
             上传结果
@@ -172,7 +179,10 @@ class CloudDriveClient:
                 f.read = read_with_progress
             
             files = {'file': (filename, f)}
-            params = {'path': remote_path}
+            params = {
+                'path': remote_path,
+                'enable_compression': enable_compression
+            }
             headers = self._get_headers()
             
             try:
