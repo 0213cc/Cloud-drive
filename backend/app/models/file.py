@@ -58,3 +58,33 @@ class FileHistory(Base):
 
     def __repr__(self):
         return f"<FileHistory(file_id='{self.file_id}', version='{self.version}')>"
+
+
+class FileChunk(Base):
+    """文件块元数据"""
+    __tablename__ = "file_chunks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    hash_value = Column(String(64), unique=True, nullable=False, index=True)
+    size = Column(BigInteger, nullable=False)
+    s3_key = Column(String(500), nullable=False, unique=True)
+    compression = Column(String(20), default="none")
+    ref_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<FileChunk(hash='{self.hash_value}', size='{self.size}')>"
+
+
+class FileChunkUsage(Base):
+    """文件块使用记录"""
+    __tablename__ = "file_chunk_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(Integer, ForeignKey("files.id"), nullable=False, index=True)
+    chunk_id = Column(Integer, ForeignKey("file_chunks.id"), nullable=False, index=True)
+    chunk_index = Column(Integer, nullable=False)
+    size = Column(BigInteger, nullable=False)
+
+    def __repr__(self):
+        return f"<FileChunkUsage(file_id='{self.file_id}', chunk_id='{self.chunk_id}', index='{self.chunk_index}')>"

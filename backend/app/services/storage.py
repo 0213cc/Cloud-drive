@@ -7,6 +7,7 @@ import hashlib
 from typing import BinaryIO, Optional, List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from botocore.exceptions import ClientError
+from botocore.config import Config
 from config import get_settings
 import io
 import logging
@@ -14,28 +15,39 @@ import logging
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-
 class S3StorageService:
-    """S3存储服务"""
+    """S3存储服务（兼容AWS S3和MinIO）"""
     
     def __init__(self):
-        """初始化S3客户端"""
-        # 如果提供了Access Key，使用显式凭证
-        # 否则boto3会自动使用EC2 IAM角色（更安全）
+        """初始化S3客户端（支持MinIO的endpoint配置）"""
+        # 配置签名版本（MinIO需要s3v4签名）
+        config = Config(
+            signature_version='s3v4',
+            retries={
+                'max_attempts': 10,
+                'mode': 'standard'
+            }
+        )
+        
+        # 客户端参数（基础配置）
+        client_kwargs = {
+            'region_name': settings.aws_region,
+            'config': config
+        }
+        
+        # 添加凭证（如果有）
         if settings.aws_access_key_id and settings.aws_secret_access_key:
-            logger.info("Using explicit AWS credentials (Access Key)")
-            self.s3_client = boto3.client(
-                's3',
-                aws_access_key_id=settings.aws_access_key_id,
-                aws_secret_access_key=settings.aws_secret_access_key,
-                region_name=settings.aws_region
-            )
-        else:
-            logger.info("Using IAM role credentials (EC2 Instance Profile)")
-            self.s3_client = boto3.client(
-                's3',
-                region_name=settings.aws_region
-            )
+            logger.info("Using explicit credentials (Access Key)")
+            client_kwargs['aws_access_key_id'] = settings.aws_access_key_id
+            client_kwargs['aws_secret_access_key'] = settings.aws_secret_access_key
+        
+        # 添加MinIO端点（如果配置了）
+        if settings.aws_s3_endpoint_url:
+            logger.info(f"Using custom S3 endpoint: {settings.aws_s3_endpoint_url}")
+            client_kwargs['endpoint_url'] = settings.aws_s3_endpoint_url
+        
+        # 初始化客户端
+        self.s3_client = boto3.client('s3', **client_kwargs)
         
         self.bucket_name = settings.aws_s3_bucket
         self.chunk_size = settings.chunk_size
@@ -65,7 +77,9 @@ class S3StorageService:
         self, 
         file_obj: BinaryIO, 
         s3_key: str,
-        content_type: Optional[str] = None
+        content_type: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        content_encoding: Optional[str] = None
     ) -> Dict:
         """
         简单上传（小文件）
@@ -83,6 +97,10 @@ class S3StorageService:
             extra_args = {}
             if content_type:
                 extra_args['ContentType'] = content_type
+            if metadata:
+                extra_args['Metadata'] = metadata
+            if content_encoding:
+                extra_args['ContentEncoding'] = content_encoding
             
             response = self.s3_client.put_object(
                 Bucket=self.bucket_name,
@@ -108,7 +126,9 @@ class S3StorageService:
         file_obj: BinaryIO, 
         s3_key: str,
         file_size: int,
-        content_type: Optional[str] = None
+        content_type: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        content_encoding: Optional[str] = None
     ) -> Dict:
         """
         多线程分块上传（大文件）
@@ -127,6 +147,10 @@ class S3StorageService:
             extra_args = {}
             if content_type:
                 extra_args['ContentType'] = content_type
+            if metadata:
+                extra_args['Metadata'] = metadata
+            if content_encoding:
+                extra_args['ContentEncoding'] = content_encoding
             
             response = self.s3_client.create_multipart_upload(
                 Bucket=self.bucket_name,
@@ -218,7 +242,9 @@ class S3StorageService:
         file_obj: BinaryIO, 
         s3_key: str,
         file_size: int,
-        content_type: Optional[str] = None
+        content_type: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        content_encoding: Optional[str] = None
     ) -> Dict:
         """
         智能上传：根据文件大小选择上传方式
@@ -234,10 +260,23 @@ class S3StorageService:
         """
         if file_size > self.multipart_threshold:
             logger.info(f"使用多线程上传 (文件大小: {file_size / 1024 / 1024:.2f} MB)")
-            return self.upload_file_multipart(file_obj, s3_key, file_size, content_type)
+            return self.upload_file_multipart(
+                file_obj, 
+                s3_key, 
+                file_size, 
+                content_type, 
+                metadata,
+                content_encoding
+            )
         else:
             logger.info(f"使用简单上传 (文件大小: {file_size / 1024 / 1024:.2f} MB)")
-            return self.upload_file_simple(file_obj, s3_key, content_type)
+            return self.upload_file_simple(
+                file_obj, 
+                s3_key, 
+                content_type,
+                metadata,
+                content_encoding
+            )
     
     def download_file_simple(self, s3_key: str, output_path: str) -> Dict:
         """
@@ -372,10 +411,15 @@ class S3StorageService:
             
             if file_size > self.multipart_threshold:
                 logger.info(f"使用多线程下载 (文件大小: {file_size / 1024 / 1024:.2f} MB)")
-                return self.download_file_multithread(s3_key, output_path, file_size)
+                result = self.download_file_multithread(s3_key, output_path, file_size)
             else:
                 logger.info(f"使用简单下载 (文件大小: {file_size / 1024 / 1024:.2f} MB)")
-                return self.download_file_simple(s3_key, output_path)
+                result = self.download_file_simple(s3_key, output_path)
+
+            result['content_encoding'] = response.get('ContentEncoding')
+            result['metadata'] = response.get('Metadata', {})
+            result['content_type'] = response.get('ContentType')
+            return result
                 
         except ClientError as e:
             logger.error(f"获取文件信息失败: {e}")
@@ -403,7 +447,8 @@ class S3StorageService:
             response = self.s3_client.copy_object(
                 CopySource=copy_source,
                 Bucket=self.bucket_name,
-                Key=destination_key
+                Key=destination_key,
+                MetadataDirective='COPY'
             )
             
             etag = response.get('CopyObjectResult', {}).get('ETag', '').strip('"')

@@ -4,6 +4,13 @@
 import requests
 import os
 import sys
+import gzip
+import shutil
+import tempfile
+import hashlib
+import mimetypes
+import logging
+import io
 from typing import Optional, Dict, List
 from tqdm import tqdm
 import json
@@ -30,6 +37,9 @@ class CloudDriveClient:
         self.base_url = base_url or config.API_BASE_URL
         self.session = requests.Session()
         self.auth_client = auth_client or AuthClient(self.base_url)
+        self.compression_algorithm = 'gzip'
+        self.chunk_size = 4 * 1024 * 1024  # 4MB
+        self.chunk_threshold = self.chunk_size * 2
     
     def _get_headers(self) -> dict:
         """
@@ -49,6 +59,207 @@ class CloudDriveClient:
                 pass  # 未认证时忽略
         
         return headers
+
+    def _calculate_sha256(self, file_path: str) -> Optional[str]:
+        """计算文件的SHA-256哈希"""
+        sha256 = hashlib.sha256()
+        try:
+            with open(file_path, 'rb') as f:
+                for chunk in iter(lambda: f.read(8192), b''):
+                    if not chunk:
+                        break
+                    sha256.update(chunk)
+            return sha256.hexdigest()
+        except Exception as exc:
+            logger = logging.getLogger(__name__)
+            logger.error(f"计算哈希失败 {file_path}: {exc}")
+            return None
+
+    def _check_dedup(self, hash_value: Optional[str]) -> Dict:
+        """向服务器查询哈希是否已存在"""
+        if not hash_value:
+            return {"exists": False}
+        url = f"{self.base_url}/api/files/hash/check"
+        headers = self._get_headers()
+        try:
+            response = self.session.post(url, json={"hash_value": hash_value}, headers=headers)
+            if response.status_code == 200:
+                return response.json()
+        except Exception:
+            pass
+        return {"exists": False}
+
+    def _request_dedup_upload(self, hash_value: str, remote_path: str, filename: str, content_type: Optional[str]) -> Optional[Dict]:
+        """请求服务器直接创建去重文件"""
+        url = f"{self.base_url}/api/files/dedup/upload"
+        headers = self._get_headers()
+        payload = {
+            "hash_value": hash_value,
+            "path": remote_path,
+            "filename": filename,
+            "content_type": content_type
+        }
+        try:
+            response = self.session.post(url, json=payload, headers=headers)
+            if response.status_code == 200:
+                return response.json()
+        except Exception:
+            return None
+        return None
+
+    def _request_dedup_update(self, file_id: int, hash_value: str, base_version: Optional[int], content_type: Optional[str]) -> Optional[Dict]:
+        """请求服务器在更新时执行去重"""
+        url = f"{self.base_url}/api/files/dedup/update/{file_id}"
+        headers = self._get_headers()
+        params = {}
+        if base_version is not None:
+            params["base_version"] = base_version
+        payload = {
+            "hash_value": hash_value,
+            "content_type": content_type
+        }
+        try:
+            response = self.session.post(url, json=payload, params=params, headers=headers)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return {"success": False, "error": response.json().get("detail")}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    def _chunk_file(self, file_path: str) -> List[Dict]:
+        """将文件拆分为固定大小的块"""
+        chunks = []
+        offset = 0
+        index = 0
+        with open(file_path, 'rb') as f:
+            while True:
+                data = f.read(self.chunk_size)
+                if not data:
+                    break
+                chunk_hash = hashlib.sha256(data).hexdigest()
+                chunks.append({
+                    "index": index,
+                    "hash_value": chunk_hash,
+                    "size": len(data),
+                    "offset": offset
+                })
+                offset += len(data)
+                index += 1
+        return chunks
+
+    def _chunks_check(self, chunks: List[Dict]) -> Dict:
+        """向服务器查询块是否存在"""
+        url = f"{self.base_url}/api/files/chunks/check"
+        headers = self._get_headers()
+        payload = {
+            "chunks": [
+                {"hash_value": c["hash_value"], "size": c["size"]}
+                for c in chunks
+            ]
+        }
+        response = self.session.post(url, json=payload, headers=headers)
+        if response.status_code == 200:
+            return response.json()
+        raise RuntimeError(response.json().get('detail', '块检查失败'))
+
+    def _upload_chunk(self, hash_value: str, chunk_bytes: bytes, size: int):
+        """上传缺失的块"""
+        url = f"{self.base_url}/api/files/chunks/upload"
+        headers = self._get_headers()
+        compressed_bytes = gzip.compress(chunk_bytes)
+        headers['X-Compression'] = 'gzip'
+        files = {'chunk': ('chunk.bin', io.BytesIO(compressed_bytes))}
+        params = {'hash_value': hash_value, 'size': size}
+        response = self.session.post(url, params=params, files=files, headers=headers)
+        if response.status_code != 200:
+            raise RuntimeError(response.json().get('detail', '块上传失败'))
+
+    def _upload_missing_chunks(self, file_path: str, chunks: List[Dict], missing_hashes: List[str]):
+        """上传服务器缺失的块"""
+        missing_set = set(missing_hashes or [])
+        if not missing_set:
+            return
+        with open(file_path, 'rb') as f:
+            for chunk in chunks:
+                data = f.read(chunk["size"])
+                if chunk["hash_value"] in missing_set:
+                    self._upload_chunk(chunk["hash_value"], data, chunk["size"])
+
+    def _assemble_chunks(self, remote_path: str, filename: str, chunks: List[Dict], file_hash: Optional[str], content_type: Optional[str], file_id: Optional[int] = None, base_version: Optional[int] = None) -> Dict:
+        """通知服务器通过块组装文件"""
+        url = f"{self.base_url}/api/files/chunks/assemble"
+        headers = self._get_headers()
+        payload = {
+            "path": remote_path,
+            "filename": filename,
+            "chunks": [
+                {"hash_value": c["hash_value"], "size": c["size"]}
+                for c in chunks
+            ],
+            "file_hash": file_hash,
+            "content_type": content_type
+        }
+        if file_id:
+            payload["file_id"] = file_id
+        if base_version is not None:
+            payload["base_version"] = base_version
+
+        response = self.session.post(url, json=payload, headers=headers)
+        if response.status_code == 200:
+            return response.json()
+        raise RuntimeError(response.json().get('detail', '块组装失败'))
+
+    def _try_chunked_flow(self, file_path: str, remote_path: str, filename: str, file_hash: Optional[str], content_type: Optional[str], file_id: Optional[int] = None, base_version: Optional[int] = None) -> Optional[Dict]:
+        """尝试块级去重流程"""
+        try:
+            chunks = self._chunk_file(file_path)
+            if not chunks:
+                return None
+            check_result = self._chunks_check(chunks)
+            missing = check_result.get('missing', [])
+            self._upload_missing_chunks(file_path, chunks, missing)
+            result = self._assemble_chunks(remote_path, filename, chunks, file_hash, content_type, file_id=file_id, base_version=base_version)
+            return result
+        except Exception as exc:
+            print(f"⚠️ 块级去重失败: {exc}")
+            return None
+
+    def _prepare_upload_stream(self, file_path: str):
+        """
+        根据配置对文件进行压缩，返回可上传的路径及大小信息
+        """
+        original_size = os.path.getsize(file_path)
+        compression = self.compression_algorithm
+
+        if not compression:
+            return file_path, original_size, original_size, None, False
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".gz")
+        temp_path = temp_file.name
+        temp_file.close()
+
+        try:
+            with open(file_path, 'rb') as src, gzip.open(temp_path, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+        except Exception:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise
+
+        compressed_size = os.path.getsize(temp_path)
+        return temp_path, original_size, compressed_size, compression, True
+
+    def _finalize_download(self, temp_path: str, output_path: str, compression: Optional[str]):
+        """根据压缩算法将临时文件还原为最终文件"""
+        if compression and compression.lower() == 'gzip':
+            with gzip.open(temp_path, 'rb') as src, open(output_path, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+            os.remove(temp_path)
+            return
+
+        if temp_path != output_path:
+            shutil.move(temp_path, output_path)
     
     def update_file(
         self, 
@@ -77,37 +288,75 @@ class CloudDriveClient:
             return {"success": False, "error": "File not found or no access."}
         base_version = file_info.get('version')
         
-        file_size = os.path.getsize(file_path)
         filename = os.path.basename(file_path)
-        
-        print(f"Updating file: {filename} (ID: {file_id}, base version: {base_version}) -> {file_size / 1024 / 1024:.2f} MB")
+        content_type = mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
+        hash_value = self._calculate_sha256(file_path)
+
+        if hash_value:
+            dedup_check = self._check_dedup(hash_value)
+            if dedup_check.get("exists"):
+                dedup_result = self._request_dedup_update(file_id, hash_value, base_version, content_type)
+                if dedup_result and dedup_result.get("success"):
+                    print(f"✓ {dedup_result.get('message', '去重更新成功')}")
+                    return dedup_result
+                else:
+                    error_msg = dedup_result.get("error") if dedup_result else "dedup request failed"
+                    print(f"⚠️ 去重更新失败，改为常规上传: {error_msg}")
+        file_size = os.path.getsize(file_path)
+        if file_size >= self.chunk_threshold:
+            remote_dir = os.path.dirname(file_info.get('path', '/')) or '/'
+            chunk_result = self._try_chunked_flow(
+                file_path,
+                remote_dir,
+                filename,
+                hash_value,
+                content_type,
+                file_id=file_id,
+                base_version=base_version
+            )
+            if chunk_result:
+                print(f"✓ 块级去重上传成功: {filename}")
+                return chunk_result
+
+        upload_path, original_size, payload_size, compression, is_temp = self._prepare_upload_stream(file_path)
+
+        if compression:
+            print(f"Updating file: {filename} (ID: {file_id}, base version: {base_version}) -> 原始 {original_size / 1024 / 1024:.2f} MB, 压缩后 {payload_size / 1024 / 1024:.2f} MB")
+        else:
+            print(f"Updating file: {filename} (ID: {file_id}, base version: {base_version}) -> {original_size / 1024 / 1024:.2f} MB")
         
         url = f"{self.base_url}/api/files/update/{file_id}"
         params = {"base_version": base_version}
+        cleanup_paths = []
+        if is_temp:
+            cleanup_paths.append(upload_path)
         
-        with open(file_path, 'rb') as f:
-            if show_progress:
-                progress_bar = tqdm(
-                    total=file_size,
-                    unit='B',
-                    unit_scale=True,
-                    desc=f"Updating {filename}"
-                )
+        progress_bar = None
+        try:
+            with open(upload_path, 'rb') as f:
+                if show_progress:
+                    progress_bar = tqdm(
+                        total=payload_size,
+                        unit='B',
+                        unit_scale=True,
+                        desc=f"Updating {filename}"
+                    )
+                    
+                    original_read = f.read
+                    def read_with_progress(size=-1):
+                        data = original_read(size)
+                        progress_bar.update(len(data))
+                        return data
+                    f.read = read_with_progress
+            
+                files = {'file': (filename, f)}
+                headers = self._get_headers()
+                if compression:
+                    headers['X-Compression'] = compression
                 
-                original_read = f.read
-                def read_with_progress(size=-1):
-                    data = original_read(size)
-                    progress_bar.update(len(data))
-                    return data
-                f.read = read_with_progress
-            
-            files = {'file': (filename, f)}
-            headers = self._get_headers()
-            
-            try:
                 response = self.session.post(url, files=files, params=params, headers=headers)
                 
-                if show_progress:
+                if progress_bar:
                     progress_bar.close()
                 
                 if response.status_code == 200:
@@ -119,11 +368,15 @@ class CloudDriveClient:
                     print(f"✗ Update failed: {error_msg}")
                     return {"success": False, "error": error_msg}
                     
-            except Exception as e:
-                if show_progress:
-                    progress_bar.close()
-                print(f"✗ Update exception: {str(e)}")
-                return {"success": False, "error": str(e)}
+        except Exception as e:
+            if progress_bar:
+                progress_bar.close()
+            print(f"✗ Update exception: {str(e)}")
+            return {"success": False, "error": str(e)}
+        finally:
+            for temp_file in cleanup_paths:
+                if temp_file and os.path.exists(temp_file):
+                    os.remove(temp_file)
 
     def upload_file(
         self, 
@@ -144,41 +397,68 @@ class CloudDriveClient:
         """
         if not os.path.exists(file_path):
             return {"success": False, "error": "文件不存在"}
-        
-        file_size = os.path.getsize(file_path)
+
         filename = os.path.basename(file_path)
-        
-        print(f"上传文件: {filename} ({file_size / 1024 / 1024:.2f} MB)")
+        content_type = mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
+        hash_value = self._calculate_sha256(file_path)
+        file_size = os.path.getsize(file_path)
+
+        if hash_value:
+            dedup_check = self._check_dedup(hash_value)
+            if dedup_check.get("exists"):
+                dedup_result = self._request_dedup_upload(hash_value, remote_path, filename, content_type)
+                if dedup_result and dedup_result.get("success"):
+                    print(f"✓ 上传成功（复用已有文件）: {filename}")
+                    return dedup_result
+                else:
+                    print("⚠️ 去重复用失败，改为常规上传")
+
+        if file_size >= self.chunk_threshold:
+            chunk_result = self._try_chunked_flow(file_path, remote_path, filename, hash_value, content_type)
+            if chunk_result:
+                return chunk_result
+
+        upload_path, original_size, payload_size, compression, is_temp = self._prepare_upload_stream(file_path)
+        if compression:
+            print(f"上传文件: {filename} (原始 {original_size / 1024 / 1024:.2f} MB, 压缩后 {payload_size / 1024 / 1024:.2f} MB)")
+        else:
+            print(f"上传文件: {filename} ({original_size / 1024 / 1024:.2f} MB)")
         
         url = f"{self.base_url}/api/files/upload"
+        cleanup_paths = []
+        if is_temp:
+            cleanup_paths.append(upload_path)
         
         # 准备文件
-        with open(file_path, 'rb') as f:
-            # 使用tqdm包装文件对象显示进度
-            if show_progress:
-                progress_bar = tqdm(
-                    total=file_size,
-                    unit='B',
-                    unit_scale=True,
-                    desc=f"上传 {filename}"
-                )
+        progress_bar = None
+        try:
+            with open(upload_path, 'rb') as f:
+                # 使用tqdm包装文件对象显示进度
+                if show_progress:
+                    progress_bar = tqdm(
+                        total=payload_size,
+                        unit='B',
+                        unit_scale=True,
+                        desc=f"上传 {filename}"
+                    )
+                    
+                    # 包装读取方法
+                    original_read = f.read
+                    def read_with_progress(size=-1):
+                        data = original_read(size)
+                        progress_bar.update(len(data))
+                        return data
+                    f.read = read_with_progress
                 
-                # 包装读取方法
-                original_read = f.read
-                def read_with_progress(size=-1):
-                    data = original_read(size)
-                    progress_bar.update(len(data))
-                    return data
-                f.read = read_with_progress
-            
-            files = {'file': (filename, f)}
-            params = {'path': remote_path}
-            headers = self._get_headers()
-            
-            try:
+                files = {'file': (filename, f)}
+                params = {'path': remote_path}
+                headers = self._get_headers()
+                if compression:
+                    headers['X-Compression'] = compression
+
                 response = self.session.post(url, files=files, params=params, headers=headers)
                 
-                if show_progress:
+                if progress_bar:
                     progress_bar.close()
                 
                 if response.status_code == 200:
@@ -190,11 +470,15 @@ class CloudDriveClient:
                     print(f"✗ 上传失败: {error_msg}")
                     return {"success": False, "error": error_msg}
                     
-            except Exception as e:
-                if show_progress:
-                    progress_bar.close()
-                print(f"✗ 上传异常: {str(e)}")
-                return {"success": False, "error": str(e)}
+        except Exception as e:
+            if progress_bar:
+                progress_bar.close()
+            print(f"✗ 上传异常: {str(e)}")
+            return {"success": False, "error": str(e)}
+        finally:
+            for temp_file in cleanup_paths:
+                if temp_file and os.path.exists(temp_file):
+                    os.remove(temp_file)
     
     def download_file(
         self, 
@@ -215,6 +499,8 @@ class CloudDriveClient:
         """
         url = f"{self.base_url}/api/files/download/{file_id}"
         
+        temp_download_path = None
+        compression = None
         try:
             # 流式下载
             headers = self._get_headers()
@@ -233,6 +519,9 @@ class CloudDriveClient:
             else:
                 filename = f"file_{file_id}"
             
+            compression = response.headers.get('X-Compression', 'none').lower()
+            original_size_header = response.headers.get('X-Original-Size')
+            
             # 确定输出路径
             if output_path is None:
                 os.makedirs(config.DOWNLOAD_DIR, exist_ok=True)
@@ -240,11 +529,22 @@ class CloudDriveClient:
             
             # 获取文件大小
             total_size = int(response.headers.get('content-length', 0))
-            
-            print(f"下载文件: {filename} ({total_size / 1024 / 1024:.2f} MB)")
+
+            if original_size_header and original_size_header.isdigit():
+                print(f"下载文件: {filename} (压缩 {total_size / 1024 / 1024:.2f} MB, 原始 {int(original_size_header) / 1024 / 1024:.2f} MB)")
+            else:
+                print(f"下载文件: {filename} ({total_size / 1024 / 1024:.2f} MB)")
+
+            if compression in ('gzip',):
+                temp_file = tempfile.NamedTemporaryFile(delete=False)
+                temp_download_path = temp_file.name
+                temp_file.close()
+            else:
+                temp_download_path = output_path
             
             # 下载文件
-            with open(output_path, 'wb') as f:
+            progress_bar = None
+            with open(temp_download_path, 'wb') as f:
                 if show_progress and total_size > 0:
                     progress_bar = tqdm(
                         total=total_size,
@@ -252,24 +552,26 @@ class CloudDriveClient:
                         unit_scale=True,
                         desc=f"下载 {filename}"
                     )
-                    
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
+                
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        if progress_bar:
                             progress_bar.update(len(chunk))
-                    
+                
+                if progress_bar:
                     progress_bar.close()
-                else:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-            
+
+            self._finalize_download(temp_download_path, output_path, compression)
             print(f"✓ 下载成功: {output_path}")
             return {"success": True, "path": output_path}
             
         except Exception as e:
             print(f"✗ 下载异常: {str(e)}")
             return {"success": False, "error": str(e)}
+        finally:
+            if temp_download_path and temp_download_path != output_path and os.path.exists(temp_download_path):
+                os.remove(temp_download_path)
     
     def list_files(self, path: str = "/") -> List[Dict]:
         """
