@@ -8,6 +8,7 @@ from pydantic import BaseModel
 import os
 import tempfile
 import shutil
+import logging
 from datetime import datetime
 
 from app.services.storage import S3StorageService
@@ -18,6 +19,8 @@ from app.models.user import User
 from app.utils.jwt_handler import get_current_user_id
 from app.utils.compression import CompressionService
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 

@@ -10,7 +10,7 @@
 
 ## 快速测试步骤
 
-### 步骤1：数据库迁移
+### 步骤 1：数据库迁移
 
 添加压缩功能所需的数据库字段：
 
@@ -20,6 +20,7 @@ python migrate_compression.py
 ```
 
 **预期输出：**
+
 ```
 开始迁移数据库: cloud_drive.db
 添加压缩字段到files表...
@@ -31,7 +32,7 @@ python migrate_compression.py
 现在可以使用压缩功能了
 ```
 
-### 步骤2：重启后端服务
+### 步骤 2：重启后端服务
 
 ```bash
 # Windows
@@ -45,7 +46,7 @@ source venv/bin/activate
 python -m uvicorn app.main:app --reload
 ```
 
-### 步骤3：登录客户端
+### 步骤 3：登录客户端
 
 ```bash
 cd client
@@ -54,7 +55,7 @@ python client.py login
 
 输入你的用户名和密码。
 
-### 步骤4：运行自动化测试
+### 步骤 4：运行自动化测试
 
 ```bash
 # 在项目根目录
@@ -62,6 +63,7 @@ python test_compression.py
 ```
 
 这个脚本会自动：
+
 1. 生成各种测试文件（小文件、大文件、可压缩、不可压缩）
 2. 上传文件并测试压缩功能
 3. 下载文件并验证完整性
@@ -69,6 +71,7 @@ python test_compression.py
 5. 清理测试文件
 
 **预期输出示例：**
+
 ```
 ================================================================================
 压缩功能测试
@@ -160,13 +163,13 @@ echo "Small file" > test_small.txt
 
 ```bash
 # 上传可压缩文件
-python client/client.py upload test_text_10mb.txt
+python client.py upload test_text_10mb.txt
 
 # 上传不可压缩文件
-python client/client.py upload test_random_5mb.bin
+python client.py upload test_random_5mb.bin
 
 # 上传小文件
-python client/client.py upload test_small.txt
+python client.py upload test_small.txt
 ```
 
 ### 3. 查看文件信息
@@ -180,6 +183,7 @@ python client/client.py info <FILE_ID>
 ```
 
 **查看压缩信息：**
+
 ```
 文件信息:
   ID: 46
@@ -229,7 +233,7 @@ sha256sum client/downloads/test_text_10mb.txt
 
 ## 测试场景
 
-### 场景1：文本文件压缩
+### 场景 1：文本文件压缩
 
 **目标：** 验证文本文件能被高效压缩
 
@@ -244,7 +248,7 @@ python client/client.py upload test_repeat.txt
 python client/client.py info <FILE_ID>
 ```
 
-### 场景2：二进制文件不压缩
+### 场景 2：二进制文件不压缩
 
 **目标：** 验证随机二进制文件不会被压缩（或压缩率很低）
 
@@ -259,7 +263,7 @@ python client/client.py upload test_random.bin
 python client/client.py info <FILE_ID>
 ```
 
-### 场景3：小文件不压缩
+### 场景 3：小文件不压缩
 
 **目标：** 验证小文件不会被压缩
 
@@ -274,7 +278,7 @@ python client/client.py upload test_tiny.txt
 python client/client.py info <FILE_ID>
 ```
 
-### 场景4：大文件压缩+多线程
+### 场景 4：大文件压缩+多线程
 
 **目标：** 验证大文件同时使用压缩和多线程上传
 
@@ -292,7 +296,7 @@ python client/client.py info <FILE_ID>
 python client/client.py download <FILE_ID>
 ```
 
-### 场景5：已压缩格式
+### 场景 5：已压缩格式
 
 **目标：** 验证已压缩格式不会被再次压缩
 
@@ -332,17 +336,18 @@ time python client/client.py download <FILE_ID>
 
 创建一个表格记录不同文件的压缩效果：
 
-| 文件名 | 原始大小 | 压缩后大小 | 压缩率 | 上传时间 | 下载时间 |
-|--------|---------|-----------|--------|---------|---------|
-| test_text_10mb.txt | 10 MB | 0.5 MB | 95% | 2s | 1s |
-| test_random_5mb.bin | 5 MB | 5 MB | 0% | 5s | 5s |
-| test_small.txt | 100 B | 100 B | 0% | 0.1s | 0.1s |
+| 文件名              | 原始大小 | 压缩后大小 | 压缩率 | 上传时间 | 下载时间 |
+| ------------------- | -------- | ---------- | ------ | -------- | -------- |
+| test_text_10mb.txt  | 10 MB    | 0.5 MB     | 95%    | 2s       | 1s       |
+| test_random_5mb.bin | 5 MB     | 5 MB       | 0%     | 5s       | 5s       |
+| test_small.txt      | 100 B    | 100 B      | 0%     | 0.1s     | 0.1s     |
 
 ## 常见问题
 
 ### Q1: 测试脚本报错 "未登录"
 
 **解决：**
+
 ```bash
 python client/client.py login
 ```
@@ -350,6 +355,7 @@ python client/client.py login
 ### Q2: 数据库迁移失败
 
 **解决：**
+
 ```bash
 # 备份数据库
 cp backend/cloud_drive.db backend/cloud_drive.db.backup
@@ -358,14 +364,16 @@ cp backend/cloud_drive.db backend/cloud_drive.db.backup
 python backend/migrate_compression.py
 ```
 
-### Q3: 压缩率为0%
+### Q3: 压缩率为 0%
 
 **可能原因：**
+
 - 文件太小（< 1KB）
 - 文件已经是压缩格式
 - 文件内容随机性高
 
 **验证：**
+
 ```bash
 # 查看文件类型
 file test_file.txt
@@ -377,6 +385,7 @@ ls -lh test_file.txt
 ### Q4: 下载后文件哈希不匹配
 
 **检查步骤：**
+
 1. 查看服务器日志：`sudo journalctl -u cloud-drive -f`
 2. 检查文件信息：`python client/client.py info <FILE_ID>`
 3. 重新上传文件
@@ -384,11 +393,13 @@ ls -lh test_file.txt
 ### Q5: 上传速度没有提升
 
 **可能原因：**
+
 - 网络速度是瓶颈
 - 文件压缩率低
-- CPU性能限制
+- CPU 性能限制
 
 **优化：**
+
 - 使用更快的网络
 - 只对文本文件启用压缩
 - 调整压缩级别
@@ -421,12 +432,12 @@ rm test_*.txt test_*.bin
 
 1. 查看完整文档：[docs/COMPRESSION_GUIDE.md](docs/COMPRESSION_GUIDE.md)
 2. 部署到生产环境：[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
-3. 查看API文档：http://localhost:8000/docs
+3. 查看 API 文档：http://localhost:8000/docs
 
 ## 技术支持
 
 如有问题：
+
 - 查看日志：`sudo journalctl -u cloud-drive -f`
 - 运行测试：`python test_compression.py`
 - 查看文档：`docs/COMPRESSION_GUIDE.md`
-
