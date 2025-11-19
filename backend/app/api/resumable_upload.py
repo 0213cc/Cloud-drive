@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 from app.models.database import get_db
 from app.models.upload_session import UploadSession, UploadStatus
 from app.utils.jwt_handler import get_current_user_id
-from app.api.block_upload import assemble_file as block_assemble_file, AssembleFileRequest
+from app.api.block_upload import assemble_file as block_assemble_file, AssembleFileRequest, get_storage_service
+from app.services.storage import S3StorageService
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,7 @@ async def complete_upload_session(
     upload_id: str,
     request: AssembleFileRequest,
     db: Session = Depends(get_db),
+    storage: S3StorageService = Depends(get_storage_service),
     user_id: int = Depends(get_current_user_id)
 ):
     """
@@ -170,7 +172,7 @@ async def complete_upload_session(
 
     # 调用现有的组装函数
     try:
-        result = await block_assemble_file(request, db, user_id)
+        result = await block_assemble_file(request, db, storage, user_id)
 
         # 更新会话状态
         session.status = UploadStatus.COMPLETED

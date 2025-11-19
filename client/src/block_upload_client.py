@@ -8,7 +8,7 @@ import os
 from typing import List, Dict, Optional
 import requests
 from tqdm import tqdm
-from .resumable_client import ResumableUploadClient
+from resumable_client import ResumableUploadClient
 
 
 class BlockInfo:
