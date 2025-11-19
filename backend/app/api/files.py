@@ -1034,9 +1034,13 @@ async def revert_file_version(
         db_file.chunk_id = history_version.chunk_id
         db_file.is_compressed = history_version.is_compressed
         db_file.compressed_size = history_version.compressed_size
-        # S3相关信息也从历史版本中恢复，因为它们与特定的chunk相关联
-        db_file.s3_key = history_version.s3_key
-        db_file.s3_etag = history_version.s3_etag
+        # S3-related info must be restored from the FileChunk, which is the source of truth.
+        target_chunk = db.query(FileChunk).filter(FileChunk.id == history_version.chunk_id).first()
+        if not target_chunk:
+            raise HTTPException(status_code=404, detail=f"Cannot revert: The underlying file chunk for version {version} no longer exists.")
+
+        db_file.s3_key = target_chunk.s3_key
+        db_file.s3_etag = target_chunk.s3_etag
         
         db_file.version += 1
         db_file.updated_at = datetime.utcnow()
