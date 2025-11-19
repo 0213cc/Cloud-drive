@@ -140,6 +140,7 @@ class CloudDriveClient:
         enable_compression: bool = True,
         enable_deduplication: bool = True,
         enable_block_deduplication: bool = True,
+        enable_resumable: bool = True,
         chunk_size: int = None
     ) -> Dict:
         """
@@ -178,7 +179,8 @@ class CloudDriveClient:
                     headers=headers,
                     chunk_size=chunk_size,
                     enable_compression=enable_compression,
-                    show_progress=show_progress
+                    show_progress=show_progress,
+                    enable_resumable=enable_resumable
                 )
                 return result
             except Exception as e:
@@ -892,7 +894,8 @@ def main():
     @click.option('--no-dedup', is_flag=True, help='禁用文件级去重')
     @click.option('--no-block-dedup', is_flag=True, help='禁用块级去重')
     @click.option('--chunk-size', type=int, help='块大小（MB），用于块级去重')
-    def upload(file_path, path, no_compression, no_dedup, no_block_dedup, chunk_size):
+    @click.option('--no-resume', is_flag=True, help='禁用断点续传')
+    def upload(file_path, path, no_compression, no_dedup, no_block_dedup, chunk_size, no_resume):
         """上传新文件
         
         示例：
@@ -930,7 +933,8 @@ def main():
             enable_compression=not no_compression,
             enable_deduplication=not no_dedup,
             enable_block_deduplication=not no_block_dedup,
-            chunk_size=chunk_size_bytes
+            chunk_size=chunk_size_bytes,
+            enable_resumable=not no_resume
         )
 
     @cli.command()

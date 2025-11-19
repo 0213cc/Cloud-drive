@@ -99,10 +99,13 @@ async def check_blocks(
     )
 
 
+from app.models.upload_session import UploadSession, UploadStatus
+
 @router.post("/upload-block")
 async def upload_block(
     block_hash: str = Query(..., description="数据块哈希值"),
     block_index: int = Query(..., description="数据块序号"),
+    upload_id: Optional[str] = Query(None, description="上传会话ID，用于断点续传"),
     enable_compression: bool = Query(True, description="是否启用压缩"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -217,6 +220,23 @@ async def upload_block(
             stored_content_type=stored_content_type
         )
         
+        # 8. 如果是断点续传，更新会话状态
+        if upload_id:
+            session = db.query(UploadSession).filter(
+                UploadSession.upload_id == upload_id,
+                UploadSession.user_id == user_id
+            ).first()
+
+            if session and block_index not in session.uploaded_chunks:
+                # 创建一个新的列表副本以触发SQLAlchemy的变更检测
+                updated_chunks = list(session.uploaded_chunks)
+                updated_chunks.append(block_index)
+                session.uploaded_chunks = updated_chunks
+                
+                session.status = UploadStatus.UPLOADING
+                db.commit()
+                logger.info(f"更新上传会话 {upload_id}: 已添加数据块 {block_index}")
+
         logger.info(
             f"上传数据块成功: block_id={block_chunk.id}, "
             f"hash={block_hash[:16]}..., size={original_size}, "

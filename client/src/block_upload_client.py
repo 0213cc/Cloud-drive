@@ -8,6 +8,7 @@ import os
 from typing import List, Dict, Optional
 import requests
 from tqdm import tqdm
+from .resumable_client import ResumableUploadClient
 
 
 class BlockInfo:
@@ -131,6 +132,7 @@ class BlockUploadClient:
         session: requests.Session,
         base_url: str,
         block: BlockInfo,
+        upload_id: Optional[str],
         enable_compression: bool,
         headers: Dict,
         show_progress: bool = False
@@ -156,6 +158,8 @@ class BlockUploadClient:
             "block_index": block.index,
             "enable_compression": enable_compression
         }
+        if upload_id:
+            params["upload_id"] = upload_id
         
         files = {
             "file": (f"block_{block.index}", block.data, "application/octet-stream")
@@ -253,7 +257,8 @@ class BlockUploadClient:
         chunk_size: int = None,
         chunking_algorithm: str = "fixed",
         enable_compression: bool = True,
-        show_progress: bool = True
+        show_progress: bool = True,
+        enable_resumable: bool = True
     ) -> Dict:
         """
         使用块级去重上传文件
@@ -294,24 +299,51 @@ class BlockUploadClient:
         chunks = BlockUploadClient.chunk_file_fixed(file_path, chunk_size)
         print(f"✓ 文件已分成 {len(chunks)} 个数据块")
         
-        # 3. 检查哪些块已存在
-        if show_progress:
+        upload_id = None
+        uploaded_chunks_indices = set()
+
+        if enable_resumable:
+            print("启动或恢复上传会话...")
+            try:
+                session_info = ResumableUploadClient.start_session(
+                    session, base_url, filename, remote_path, file_size,
+                    file_hash, chunk_size, len(chunks), headers
+                )
+                upload_id = session_info['upload_id']
+                uploaded_chunks_indices = set(session_info.get('uploaded_chunks', []))
+                print(f"✓ {session_info['message']}: upload_id={upload_id}")
+                if uploaded_chunks_indices:
+                    print(f"✓ 已上传 {len(uploaded_chunks_indices)}/{len(chunks)} 个数据块")
+
+            except Exception as e:
+                print(f"✗ 启动上传会话失败: {e}. 将回退到常规块级上传。")
+                enable_resumable = False
+        
+        # 3. 确定需要上传的数据块
+        chunks_to_upload = []
+        if enable_resumable:
+            # 基于会话状态确定需要上传的块
+            for chunk in chunks:
+                if chunk.index not in uploaded_chunks_indices:
+                    chunks_to_upload.append(chunk)
+        else:
+            # 基于哈希去重检查
             print("检查数据块去重...")
-        hash_values = [chunk.hash_value for chunk in chunks]
-        check_result = BlockUploadClient.check_blocks(session, base_url, hash_values, headers)
-        
-        existing_blocks = check_result['existing_blocks']
-        missing_blocks = check_result['missing_blocks']
-        
-        dedup_count = len(existing_blocks)
-        upload_count = len(missing_blocks)
-        
+            hash_values = [chunk.hash_value for chunk in chunks]
+            check_result = BlockUploadClient.check_blocks(session, base_url, hash_values, headers)
+            missing_hashes = set(check_result['missing_blocks'])
+            for chunk in chunks:
+                if chunk.hash_value in missing_hashes:
+                    chunks_to_upload.append(chunk)
+
+        dedup_count = len(chunks) - len(chunks_to_upload)
+        upload_count = len(chunks_to_upload)
         print(f"✓ 已存在: {dedup_count} 个块, 需上传: {upload_count} 个块")
-        
-        if dedup_count > 0:
+
+        if dedup_count > 0 and len(chunks) > 0:
             dedup_ratio = int(dedup_count / len(chunks) * 100)
-            print(f"✓ 块级去重率: {dedup_ratio}%")
-        
+            print(f"✓ 去重率: {dedup_ratio}%")
+
         # 4. 上传缺失的数据块
         if upload_count > 0:
             if show_progress:
@@ -322,40 +354,23 @@ class BlockUploadClient:
                     desc="上传进度"
                 )
             
-            uploaded = 0
-            for chunk in chunks:
-                if chunk.hash_value in missing_blocks:
-                    try:
-                        result = BlockUploadClient.upload_block(
-                            session,
-                            base_url,
-                            chunk,
-                            enable_compression,
-                            headers,
-                            show_progress=False
-                        )
-                        
-                        uploaded += 1
-                        
-                        if show_progress:
-                            progress_bar.update(1)
-                            
-                            # 显示压缩信息
-                            if result.get('compressed'):
-                                compression_ratio = result.get('compression_ratio', 0)
-                                progress_bar.set_postfix({
-                                    '压缩': f"{compression_ratio}%"
-                                })
-                    
-                    except Exception as e:
-                        if show_progress:
-                            progress_bar.close()
-                        raise Exception(f"上传数据块 {chunk.index} 失败: {e}")
+            for chunk in chunks_to_upload:
+                try:
+                    result = BlockUploadClient.upload_block(
+                        session, base_url, chunk, upload_id,
+                        enable_compression, headers, show_progress=False
+                    )
+                    if show_progress:
+                        progress_bar.update(1)
+                        if result.get('compressed'):
+                            ratio = result.get('compression_ratio', 0)
+                            progress_bar.set_postfix({'压缩': f"{ratio}%"})
+                except Exception as e:
+                    if show_progress: progress_bar.close()
+                    raise Exception(f"上传数据块 {chunk.index} 失败: {e}")
             
-            if show_progress:
-                progress_bar.close()
-            
-            print(f"✓ 已上传 {uploaded} 个数据块")
+            if show_progress: progress_bar.close()
+            print(f"✓ 已上传 {upload_count} 个数据块")
         else:
             print("✓ 所有数据块都已存在，无需上传")
         
@@ -366,23 +381,25 @@ class BlockUploadClient:
         import mimetypes
         content_type, _ = mimetypes.guess_type(filename)
         
-        result = BlockUploadClient.assemble_file(
-            session,
-            base_url,
-            filename,
-            remote_path,
-            content_type,
-            file_size,
-            file_hash,
-            chunking_algorithm,
-            chunk_size,
-            chunks,
-            headers
-        )
+        blocks_info = [{"hash": c.hash_value, "index": c.index, "offset": c.offset, "size": c.size} for c in chunks]
+        assemble_request_data = {
+            "filename": filename, "path": remote_path, "content_type": content_type,
+            "total_size": file_size, "file_hash": file_hash, "chunking_algorithm": chunking_algorithm,
+            "chunk_size": chunk_size, "blocks": blocks_info
+        }
+
+        if enable_resumable and upload_id:
+            result = ResumableUploadClient.complete_session(
+                session, base_url, upload_id, assemble_request_data, headers
+            )
+        else:
+            result = BlockUploadClient.assemble_file(
+                session, base_url, filename, remote_path, content_type,
+                file_size, file_hash, chunking_algorithm, chunk_size, chunks, headers
+            )
         
-        if result['success']:
+        if result.get('success'):
             print(f"✓ {result['message']}")
-            
             if result.get('deduplication_stats'):
                 stats = result['deduplication_stats']
                 print(f"  - 总块数: {stats['total_blocks']}")
@@ -390,12 +407,10 @@ class BlockUploadClient:
                 print(f"  - 去重率: {stats['deduplication_ratio']}%")
             
             return {
-                "success": True,
-                "file_id": result.get('file_id'),
-                "version": result.get('version'),
-                "message": result['message'],
+                "success": True, "file_id": result.get('file_id'),
+                "version": result.get('version'), "message": result['message'],
                 "deduplication_stats": result.get('deduplication_stats')
             }
         else:
-            raise Exception(f"组装文件失败: {result.get('message')}")
+            raise Exception(f"组装文件失败: {result.get('message', '未知错误')}")
 

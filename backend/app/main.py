@@ -12,6 +12,7 @@ from app.api.auth import router as auth_router
 from app.api.share import router as share_router
 from app.api.deduplication import router as dedup_router
 from app.api.block_upload import router as block_upload_router
+from app.api.resumable_upload import router as resumable_router
 from app.models.database import init_db
 
 # 配置日志
@@ -58,6 +59,7 @@ app.include_router(sync_router)
 app.include_router(share_router)
 app.include_router(dedup_router)
 app.include_router(block_upload_router)
+app.include_router(resumable_router)
 
 
 @app.get("/")
