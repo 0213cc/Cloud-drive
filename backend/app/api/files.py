@@ -224,14 +224,7 @@ async def update_file(
         # 6. 创建或获取文件块（去重）
         chunk = DeduplicationService.check_duplicate(db, hash_value)
         
-        if chunk:
-            # 文件块已存在，增加引用计数
-            DeduplicationService.increment_reference(db, chunk)
-            logger.info(
-                f"使用已存在的文件块: chunk_id={chunk.id}, "
-                f"hash={hash_value[:16]}..., refs={chunk.reference_count}"
-            )
-        else:
+        if not chunk:
             # 创建新的文件块
             chunk = DeduplicationService.create_chunk(
                 db=db,
@@ -244,10 +237,18 @@ async def update_file(
                 compression_ratio=compression_ratio if is_compressed else None,
                 stored_content_type='application/gzip' if is_compressed else file.content_type
             )
+        else:
+            logger.info(
+                f"找到已存在的文件块: chunk_id={chunk.id}, "
+                f"hash={hash_value[:16]}..., refs={chunk.reference_count}"
+            )
 
         # 7. Handle based on conflict status
         if is_conflict:
             # CONFLICT: Create a new file entry for the conflicted copy
+            # 新文件需要增加chunk的引用计数
+            DeduplicationService.increment_reference(db, chunk)
+            
             user = db.query(User).filter(User.id == user_id).first()
             username = user.username if user else "unknown_user"
             name, ext = os.path.splitext(existing_file.filename)
@@ -293,9 +294,13 @@ async def update_file(
             )
             db.add(file_history)
             
-            # 如果旧版本有chunk_id，减少其引用计数
+            # 只有当新旧版本指向不同的文件块时，才需要调整引用计数
             if old_chunk_id and old_chunk_id != chunk.id:
+                # 减少旧版本文件块的引用计数
                 DeduplicationService.decrement_reference(db, old_chunk_id, storage)
+                # 增加新文件块的引用计数
+                DeduplicationService.increment_reference(db, chunk)
+            # 如果新旧版本指向同一个文件块，引用计数不变（历史版本和当前版本共享同一个chunk）
             
             existing_file.size = original_size
             existing_file.content_type = file.content_type
@@ -404,9 +409,13 @@ async def upload_file_by_reference(
             )
             db.add(file_history)
             
-            # 如果旧版本有chunk_id，减少其引用计数
-            if old_chunk_id:
+            # 只有当新旧版本指向不同的文件块时，才需要调整引用计数
+            if old_chunk_id and old_chunk_id != chunk_id:
+                # 减少旧版本文件块的引用计数
                 DeduplicationService.decrement_reference(db, old_chunk_id, None)
+                # 增加新chunk的引用计数
+                DeduplicationService.increment_reference(db, chunk)
+            # 如果新旧版本指向同一个文件块，引用计数不变（历史版本和当前版本共享同一个chunk）
             
             # 更新现有文件记录
             existing_file.size = size
@@ -420,9 +429,6 @@ async def upload_file_by_reference(
             existing_file.compression_ratio = chunk.compression_ratio
             existing_file.version += 1
             existing_file.updated_at = datetime.utcnow()
-            
-            # 增加新chunk的引用计数
-            DeduplicationService.increment_reference(db, chunk)
             
             db.commit()
             db.refresh(existing_file)
@@ -582,14 +588,7 @@ async def upload_file(
         # 7. 创建或获取文件块（去重）
         chunk = DeduplicationService.check_duplicate(db, hash_value)
         
-        if chunk:
-            # 文件块已存在，增加引用计数
-            DeduplicationService.increment_reference(db, chunk)
-            logger.info(
-                f"使用已存在的文件块: chunk_id={chunk.id}, "
-                f"hash={hash_value[:16]}..., refs={chunk.reference_count}"
-            )
-        else:
+        if not chunk:
             # 创建新的文件块
             chunk = DeduplicationService.create_chunk(
                 db=db,
@@ -601,6 +600,11 @@ async def upload_file(
                 compressed_size=compressed_size if is_compressed else None,
                 compression_ratio=compression_ratio if is_compressed else None,
                 stored_content_type='application/gzip' if is_compressed else file.content_type
+            )
+        else:
+            logger.info(
+                f"找到已存在的文件块: chunk_id={chunk.id}, "
+                f"hash={hash_value[:16]}..., refs={chunk.reference_count}"
             )
         
         # 8. 保存元数据到数据库
@@ -627,9 +631,13 @@ async def upload_file(
             )
             db.add(file_history)
             
-            # 如果旧版本有chunk_id，减少其引用计数
+            # 只有当新旧版本指向不同的文件块时，才需要调整引用计数
             if old_chunk_id and old_chunk_id != chunk.id:
+                # 减少旧版本文件块的引用计数
                 DeduplicationService.decrement_reference(db, old_chunk_id, storage)
+                # 增加新文件块的引用计数
+                DeduplicationService.increment_reference(db, chunk)
+            # 如果新旧版本指向同一个文件块，引用计数不变（历史版本和当前版本共享同一个chunk）
             
             # 更新现有文件记录
             existing_file.size = original_size
@@ -648,7 +656,9 @@ async def upload_file(
             db.refresh(existing_file)
             db_file = existing_file
         else:
-            # 新文件
+            # 新文件，增加chunk的引用计数
+            DeduplicationService.increment_reference(db, chunk)
+            
             db_file = FileModel(
                 user_id=user_id,
                 path=full_path,
