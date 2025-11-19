@@ -2,6 +2,7 @@
 from .user import User
 from .file import File, FileHistory
 from .file_chunk import FileChunk
+from .block_chunk import BlockChunk, FileBlockMap, FileBlockMetadata
 
-__all__ = ["User", "File", "FileHistory", "FileChunk"]
+__all__ = ["User", "File", "FileHistory", "FileChunk", "BlockChunk", "FileBlockMap", "FileBlockMetadata"]
 

@@ -706,7 +706,10 @@ async def download_file(
     - 支持下载自己的文件
     - 支持下载共享给自己的文件（需要至少有读权限）
     - 自动解压缩文件
+    - 支持块级去重文件的组装下载
     """
+    from app.utils.block_deduplication import BlockDeduplicationService
+    
     # 检查访问权限（支持共享文件）
     db_file, share = check_file_access(db, file_id, user_id, SharePermission.READ)
     
@@ -715,34 +718,93 @@ async def download_file(
     
     compressed_file_path = None
     decompressed_file_path = None
+    assembled_file_path = None
     
     try:
-        # 1. 从S3下载文件（可能是压缩的）
-        compressed_file_path = tempfile.mktemp(suffix=".download")
+        # 检查是否使用块级去重
+        metadata = None
+        if db_file.chunk_id:
+            metadata = BlockDeduplicationService.get_file_block_metadata(db, db_file.chunk_id)
         
-        result = storage.download_file(db_file.s3_key, compressed_file_path)
-        
-        if not result['success']:
-            raise HTTPException(status_code=500, detail=f"下载失败: {result.get('error')}")
-        
-        # 2. 如果文件是压缩的，需要解压
-        if db_file.is_compressed:
-            decompressed_file_path = tempfile.mktemp(suffix=f"_{db_file.filename}")
+        if metadata:
+            # 块级去重文件，需要组装
+            logger.info(f"下载块级去重文件: {db_file.filename}, blocks={metadata.total_blocks}")
             
-            with open(compressed_file_path, 'rb') as input_f, open(decompressed_file_path, 'wb') as output_f:
-                decompress_result = CompressionService.decompress_file(input_f, output_f)
-                
-                if not decompress_result['success']:
-                    raise HTTPException(status_code=500, detail=f"解压失败: {decompress_result.get('error')}")
+            assembled_file_path = tempfile.mktemp(suffix=f"_{db_file.filename}")
             
-            # 删除压缩文件，使用解压后的文件
-            if os.path.exists(compressed_file_path):
-                os.remove(compressed_file_path)
+            # 获取所有数据块
+            blocks = BlockDeduplicationService.get_file_blocks(db, db_file.chunk_id)
             
-            final_file_path = decompressed_file_path
-            logger.info(f"文件已解压: {db_file.filename}")
+            # 按顺序下载并组装数据块
+            with open(assembled_file_path, 'wb') as output_f:
+                for block_info in blocks:
+                    # 下载数据块
+                    block_temp_path = tempfile.mktemp(suffix=".block")
+                    
+                    result = storage.download_file(block_info['s3_key'], block_temp_path)
+                    if not result['success']:
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"下载数据块失败: {result.get('error')}"
+                        )
+                    
+                    # 如果数据块是压缩的，需要解压
+                    if block_info['is_compressed']:
+                        decompressed_block_path = tempfile.mktemp(suffix=".block.decompressed")
+                        
+                        with open(block_temp_path, 'rb') as input_f, open(decompressed_block_path, 'wb') as decomp_f:
+                            decompress_result = CompressionService.decompress_file(input_f, decomp_f)
+                            
+                            if not decompress_result['success']:
+                                raise HTTPException(
+                                    status_code=500,
+                                    detail=f"解压数据块失败: {decompress_result.get('error')}"
+                                )
+                        
+                        # 删除压缩的块文件
+                        if os.path.exists(block_temp_path):
+                            os.remove(block_temp_path)
+                        
+                        block_temp_path = decompressed_block_path
+                    
+                    # 写入组装文件
+                    with open(block_temp_path, 'rb') as block_f:
+                        output_f.write(block_f.read())
+                    
+                    # 删除临时块文件
+                    if os.path.exists(block_temp_path):
+                        os.remove(block_temp_path)
+            
+            final_file_path = assembled_file_path
+            logger.info(f"块级去重文件组装完成: {db_file.filename}")
         else:
-            final_file_path = compressed_file_path
+            # 常规文件或文件级去重
+            # 1. 从S3下载文件（可能是压缩的）
+            compressed_file_path = tempfile.mktemp(suffix=".download")
+            
+            result = storage.download_file(db_file.s3_key, compressed_file_path)
+            
+            if not result['success']:
+                raise HTTPException(status_code=500, detail=f"下载失败: {result.get('error')}")
+            
+            # 2. 如果文件是压缩的，需要解压
+            if db_file.is_compressed:
+                decompressed_file_path = tempfile.mktemp(suffix=f"_{db_file.filename}")
+                
+                with open(compressed_file_path, 'rb') as input_f, open(decompressed_file_path, 'wb') as output_f:
+                    decompress_result = CompressionService.decompress_file(input_f, output_f)
+                    
+                    if not decompress_result['success']:
+                        raise HTTPException(status_code=500, detail=f"解压失败: {decompress_result.get('error')}")
+                
+                # 删除压缩文件，使用解压后的文件
+                if os.path.exists(compressed_file_path):
+                    os.remove(compressed_file_path)
+                
+                final_file_path = decompressed_file_path
+                logger.info(f"文件已解压: {db_file.filename}")
+            else:
+                final_file_path = compressed_file_path
         
         # 3. 记录共享文件的下载日志
         if share:
@@ -762,6 +824,8 @@ async def download_file(
             os.remove(compressed_file_path)
         if decompressed_file_path and os.path.exists(decompressed_file_path):
             os.remove(decompressed_file_path)
+        if assembled_file_path and os.path.exists(assembled_file_path):
+            os.remove(assembled_file_path)
         raise HTTPException(status_code=500, detail=str(e))
 
 

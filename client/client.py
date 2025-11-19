@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from config import config
 from auth_client import AuthClient
 from dedup_client import DeduplicationClient
+from block_upload_client import BlockUploadClient
 
 
 class CloudDriveClient:
@@ -137,7 +138,9 @@ class CloudDriveClient:
         remote_path: str = "/",
         show_progress: bool = True,
         enable_compression: bool = True,
-        enable_deduplication: bool = True
+        enable_deduplication: bool = True,
+        enable_block_deduplication: bool = True,
+        chunk_size: int = None
     ) -> Dict:
         """
         上传文件
@@ -148,6 +151,8 @@ class CloudDriveClient:
             show_progress: 是否显示进度条
             enable_compression: 是否启用压缩（默认True）
             enable_deduplication: 是否启用去重（默认True）
+            enable_block_deduplication: 是否启用块级去重（默认True）
+            chunk_size: 块大小（字节），仅用于块级去重
             
         Returns:
             上传结果
@@ -159,6 +164,27 @@ class CloudDriveClient:
         filename = os.path.basename(file_path)
         
         print(f"上传文件: {filename} ({file_size / 1024 / 1024:.2f} MB)")
+        
+        # 判断是否使用块级去重
+        if enable_block_deduplication and BlockUploadClient.should_use_block_chunking(file_size, chunk_size):
+            print("使用块级去重上传...")
+            try:
+                headers = self._get_headers()
+                result = BlockUploadClient.upload_file_with_blocks(
+                    session=self.session,
+                    base_url=self.base_url,
+                    file_path=file_path,
+                    remote_path=remote_path,
+                    headers=headers,
+                    chunk_size=chunk_size,
+                    enable_compression=enable_compression,
+                    show_progress=show_progress
+                )
+                return result
+            except Exception as e:
+                print(f"✗ 块级上传失败: {e}")
+                print("  尝试常规上传...")
+                # 继续执行常规上传
         
         # 如果启用去重，先检查文件是否已存在
         if enable_deduplication:
@@ -862,10 +888,50 @@ def main():
     @cli.command()
     @click.argument('file_path')
     @click.option('--path', default='/', help='远程目录路径')
-    def upload(file_path, path):
-        """上传新文件"""
+    @click.option('--no-compression', is_flag=True, help='禁用压缩')
+    @click.option('--no-dedup', is_flag=True, help='禁用文件级去重')
+    @click.option('--no-block-dedup', is_flag=True, help='禁用块级去重')
+    @click.option('--chunk-size', type=int, help='块大小（MB），用于块级去重')
+    def upload(file_path, path, no_compression, no_dedup, no_block_dedup, chunk_size):
+        """上传新文件
+        
+        示例：
+        
+        \b
+        # 基本上传（自动选择最优策略）
+        python client.py upload test.bin
+        
+        \b
+        # 上传到指定目录
+        python client.py upload test.bin --path /documents
+        
+        \b
+        # 禁用压缩
+        python client.py upload test.bin --no-compression
+        
+        \b
+        # 强制使用块级去重，指定2MB块大小
+        python client.py upload large_file.bin --chunk-size 2
+        
+        \b
+        # 禁用所有去重功能
+        python client.py upload test.bin --no-dedup --no-block-dedup
+        """
         client = CloudDriveClient()
-        client.upload_file(file_path, path)
+        
+        # 转换块大小为字节
+        chunk_size_bytes = None
+        if chunk_size:
+            chunk_size_bytes = chunk_size * 1024 * 1024
+        
+        client.upload_file(
+            file_path, 
+            path,
+            enable_compression=not no_compression,
+            enable_deduplication=not no_dedup,
+            enable_block_deduplication=not no_block_dedup,
+            chunk_size=chunk_size_bytes
+        )
 
     @cli.command()
     @click.argument('file_id', type=int)
@@ -974,6 +1040,105 @@ def main():
         """删除共享"""
         client = CloudDriveClient()
         client.delete_share(share_id)
+    
+    # ==================== 块级去重命令 ====================
+    
+    @cli.command()
+    def block_stats():
+        """查看块级去重统计信息"""
+        client = CloudDriveClient()
+        headers = client._get_headers()
+        
+        try:
+            response = client.session.get(
+                f"{client.base_url}/api/block-upload/stats",
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    stats = result['stats']
+                    
+                    print("\n" + "=" * 60)
+                    print("块级去重统计信息")
+                    print("=" * 60)
+                    
+                    print(f"\n数据块统计:")
+                    print(f"  总数据块数:     {stats['total_blocks']}")
+                    print(f"  总引用次数:     {stats['total_references']}")
+                    print(f"  压缩块数:       {stats['compressed_blocks']}")
+                    
+                    print(f"\n存储空间:")
+                    print(f"  实际存储:       {stats['total_size_mb']:.2f} MB")
+                    print(f"  节省空间:       {stats['saved_space_mb']:.2f} MB")
+                    print(f"  去重率:         {stats['deduplication_ratio']}%")
+                    
+                    if stats['compressed_blocks'] > 0:
+                        print(f"  压缩后大小:     {stats['total_compressed_size_mb']:.2f} MB")
+                    
+                    print("\n" + "=" * 60)
+                else:
+                    print(f"✗ 获取统计失败")
+            else:
+                error_msg = response.json().get('detail', '未知错误')
+                print(f"✗ API调用失败: {error_msg}")
+        except Exception as e:
+            print(f"✗ 获取统计异常: {str(e)}")
+    
+    @cli.command()
+    @click.argument('file_path')
+    @click.option('--path', default='/', help='远程目录路径')
+    @click.option('--chunk-size', type=int, default=4, help='块大小（MB），默认4MB')
+    @click.option('--no-compression', is_flag=True, help='禁用压缩')
+    def block_upload(file_path, path, chunk_size, no_compression):
+        """强制使用块级去重上传文件
+        
+        示例：
+        
+        \b
+        # 使用默认4MB块大小上传
+        python client.py block-upload large_file.bin
+        
+        \b
+        # 使用2MB块大小上传
+        python client.py block-upload large_file.bin --chunk-size 2
+        
+        \b
+        # 禁用压缩
+        python client.py block-upload large_file.bin --no-compression
+        """
+        from block_upload_client import BlockUploadClient
+        
+        if not os.path.exists(file_path):
+            print(f"✗ 文件不存在: {file_path}")
+            return
+        
+        client = CloudDriveClient()
+        headers = client._get_headers()
+        
+        chunk_size_bytes = chunk_size * 1024 * 1024
+        
+        try:
+            result = BlockUploadClient.upload_file_with_blocks(
+                session=client.session,
+                base_url=client.base_url,
+                file_path=file_path,
+                remote_path=path,
+                headers=headers,
+                chunk_size=chunk_size_bytes,
+                enable_compression=not no_compression,
+                show_progress=True
+            )
+            
+            if result.get('success'):
+                print(f"\n✓ 上传成功!")
+                print(f"  文件ID: {result.get('file_id')}")
+                print(f"  版本: {result.get('version')}")
+            else:
+                print(f"\n✗ 上传失败: {result.get('error')}")
+        except Exception as e:
+            print(f"\n✗ 上传异常: {str(e)}")
     
     cli()
 
