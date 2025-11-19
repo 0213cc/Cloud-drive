@@ -4,6 +4,7 @@
 管理数据块的创建、查询和引用计数
 """
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import Optional, List, Dict
 from datetime import datetime
 import logging
@@ -363,16 +364,16 @@ class BlockDeduplicationService:
         """
         # 统计数据块
         total_blocks = db.query(BlockChunk).count()
-        total_size = db.query(db.func.sum(BlockChunk.size)).scalar() or 0
+        total_size = db.query(func.sum(BlockChunk.size)).scalar() or 0
         total_compressed_size = db.query(
-            db.func.sum(BlockChunk.compressed_size)
+            func.sum(BlockChunk.compressed_size)
         ).filter(
             BlockChunk.is_compressed == True
         ).scalar() or 0
         
         # 统计引用
         total_references = db.query(
-            db.func.sum(BlockChunk.reference_count)
+            func.sum(BlockChunk.reference_count)
         ).scalar() or 0
         
         # 计算节省的空间

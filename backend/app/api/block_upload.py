@@ -260,6 +260,7 @@ async def assemble_file(
         组装结果
     """
     try:
+        timestamp = int(datetime.utcnow().timestamp())
         # 1. 验证所有数据块都已上传
         block_chunk_ids = []
         for block_info in request.blocks:
