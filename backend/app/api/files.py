@@ -993,7 +993,7 @@ async def revert_file_version(
     user_id: int = Depends(get_current_user_id)
 ):
     """
-    回滚文件到指定版本
+    回滚文件到指定版本。此操作与文件去重功能兼容。
     """
     db_file = db.query(FileModel).filter(
         FileModel.id == file_id,
@@ -1009,36 +1009,52 @@ async def revert_file_version(
     if not history_version:
         raise HTTPException(status_code=404, detail="历史版本不存在")
 
+    # 获取当前版本和目标历史版本所引用的文件块
+    current_chunk_id = db_file.chunk_id
+    target_chunk_id = history_version.chunk_id
+
     try:
-        # 1. 将当前版本存入历史记录
+        # 1. 将当前版本信息存入历史记录
         current_version_history = FileHistory(
             file_id=db_file.id,
             version=db_file.version,
             size=db_file.size,
             hash_value=db_file.hash_value,
-            s3_key=db_file.s3_key,
-            s3_etag=db_file.s3_etag
+            chunk_id=db_file.chunk_id,
+            s3_key=db_file.s3_key, # s3_key and etag are now for metadata purposes
+            s3_etag=db_file.s3_etag,
+            is_compressed=db_file.is_compressed,
+            compressed_size=db_file.compressed_size
         )
         db.add(current_version_history)
 
-        # 2. 从S3复制历史版本文件作为新文件
-        clean_path = os.path.dirname(db_file.path).strip('/')
-        timestamp = int(datetime.utcnow().timestamp())
-        new_s3_key = f"users/{user_id}/{clean_path}/{timestamp}_{db_file.filename}" if clean_path else f"users/{user_id}/{timestamp}_{db_file.filename}"
-        
-        copy_result = storage.copy_file(history_version.s3_key, new_s3_key)
-        if not copy_result['success']:
-            raise HTTPException(status_code=500, detail="S3文件复制失败")
-
-        # 3. 用历史版本元数据和新的S3信息覆盖当前文件记录
+        # 2. 更新文件记录以反映历史版本状态
         db_file.size = history_version.size
         db_file.hash_value = history_version.hash_value
-        db_file.s3_key = new_s3_key
-        db_file.s3_etag = copy_result.get('etag')
+        db_file.chunk_id = history_version.chunk_id
+        db_file.is_compressed = history_version.is_compressed
+        db_file.compressed_size = history_version.compressed_size
+        # S3相关信息也从历史版本中恢复，因为它们与特定的chunk相关联
+        db_file.s3_key = history_version.s3_key
+        db_file.s3_etag = history_version.s3_etag
+        
         db_file.version += 1
         db_file.updated_at = datetime.utcnow()
 
-        # 4. 从历史记录中删除已恢复的版本
+        # 3. 更新文件块的引用计数
+        # 只有当两个版本指向不同的文件块时，才需要调整引用计数
+        if current_chunk_id != target_chunk_id:
+            # 减少当前版本文件块的引用计数
+            if current_chunk_id:
+                DeduplicationService.decrement_reference(db, current_chunk_id, storage)
+            
+            # 增加目标历史版本文件块的引用计数
+            if target_chunk_id:
+                target_chunk = db.query(FileChunk).filter(FileChunk.id == target_chunk_id).first()
+                if target_chunk:
+                    DeduplicationService.increment_reference(db, target_chunk)
+
+        # 4. 从历史记录中删除已恢复的版本，因为它现在是当前版本
         db.delete(history_version)
         
         db.commit()
@@ -1051,4 +1067,5 @@ async def revert_file_version(
         )
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"回滚文件失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"回滚操作失败: {str(e)}")

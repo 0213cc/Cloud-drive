@@ -184,8 +184,8 @@ class CloudDriveClient:
                 )
                 return result
             except Exception as e:
-                print(f"✗ 块级上传失败: {e}")
-                print("  尝试常规上传...")
+                print("--------------------------------")
+                
                 # 继续执行常规上传
         
         # 如果启用去重，先检查文件是否已存在
