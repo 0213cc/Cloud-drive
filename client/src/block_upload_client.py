@@ -302,6 +302,12 @@ class BlockUploadClient:
         upload_id = None
         uploaded_chunks_indices = set()
 
+        # 3. 检查服务器上已存在的数据块（跨文件去重）
+        print("检查数据块去重...")
+        hash_values = [chunk.hash_value for chunk in chunks]
+        check_result = BlockUploadClient.check_blocks(session, base_url, hash_values, headers)
+        existing_hashes = set(check_result['existing_blocks'].keys())
+
         if enable_resumable:
             print("启动或恢复上传会话...")
             try:
@@ -313,28 +319,18 @@ class BlockUploadClient:
                 uploaded_chunks_indices = set(session_info.get('uploaded_chunks', []))
                 print(f"✓ {session_info['message']}: upload_id={upload_id}")
                 if uploaded_chunks_indices:
-                    print(f"✓ 已上传 {len(uploaded_chunks_indices)}/{len(chunks)} 个数据块")
+                    print(f"✓ 会话中已上传 {len(uploaded_chunks_indices)}/{len(chunks)} 个数据块")
 
             except Exception as e:
-                print(f"✗ 启动上传会话失败: {e}. 将回退到常规块级上传。")
+                print(f"✗ 启动上传会话失败: {e}. 将禁用断点续传。")
                 enable_resumable = False
         
-        # 3. 确定需要上传的数据块
+        # 4. 确定需要上传的数据块（结合去重和断点续传）
         chunks_to_upload = []
-        if enable_resumable:
-            # 基于会话状态确定需要上传的块
-            for chunk in chunks:
-                if chunk.index not in uploaded_chunks_indices:
-                    chunks_to_upload.append(chunk)
-        else:
-            # 基于哈希去重检查
-            print("检查数据块去重...")
-            hash_values = [chunk.hash_value for chunk in chunks]
-            check_result = BlockUploadClient.check_blocks(session, base_url, hash_values, headers)
-            missing_hashes = set(check_result['missing_blocks'])
-            for chunk in chunks:
-                if chunk.hash_value in missing_hashes:
-                    chunks_to_upload.append(chunk)
+        for chunk in chunks:
+            # 如果数据块的哈希值不存在于服务器，并且其索引也不在已上传的块中，则需要上传
+            if chunk.hash_value not in existing_hashes and chunk.index not in uploaded_chunks_indices:
+                chunks_to_upload.append(chunk)
 
         dedup_count = len(chunks) - len(chunks_to_upload)
         upload_count = len(chunks_to_upload)
