@@ -1,6 +1,6 @@
 # Cloud Drive - 云盘系统
 
-基于AWS S3的分布式云盘系统，支持多线程上传下载、文件去重、差分同步等高级功能。
+基于 AWS S3 的分布式云盘系统，支持多线程上传下载、文件去重、差分同步等高级功能。
 
 ## ✨ 特性
 
@@ -8,23 +8,49 @@
 
 - ✅ **文件基础操作**：上传、下载、列表、删除、创建目录
 - ✅ **多线程传输**：智能选择上传下载方式，大文件自动启用多线程
-- ✅ **S3存储集成**：使用AWS S3对象存储，支持大规模存储
-- ✅ **元数据管理**：SQLite/PostgreSQL存储文件元信息
-- ✅ **RESTful API**：完整的REST接口，支持CORS
-- ✅ **命令行客户端**：方便的CLI工具，支持进度显示
+- ✅ **S3 存储集成**：使用 AWS S3 对象存储，支持大规模存储
+- ✅ **元数据管理**：SQLite/PostgreSQL 存储文件元信息
+- ✅ **RESTful API**：完整的 REST 接口，支持 CORS
+- ✅ **命令行客户端**：方便的 CLI 工具，支持进度显示
 
-### Phase 2-5: 高级功能（计划中）
+### Phase 2A: 用户认证系统 ✅（已完成）
 
-- 🚧 用户认证系统（JWT）
-- 🚧 文件压缩（Gzip/Zlib）
-- 🚧 文件级去重（基于哈希）
-- 🚧 块级去重（CDC算法）
-- 🚧 差分同步（rsync算法）
-- 🚧 断点续传
-- 🚧 版本控制
-- 🚧 冲突解决
-- 🚧 文件共享与协作
-- 🚧 自动同步客户端（watchdog）
+- ✅ **用户注册**：密码 bcrypt 加密
+- ✅ **用户登录**：JWT Token
+- ✅ **Token 自动管理**：保存、加载、刷新
+- ✅ **用户认证中间件**
+- ✅ **用户隔离**：每个用户独立的文件空间
+- ✅ **Token 自动刷新机制**
+- ✅ **客户端命令行认证接口**
+
+### Phase 2B: 自动同步客户端 ✅（已完成）
+
+- ✅ **文件系统实时监控**：watchdog
+- ✅ **自动上传本地变更**
+- ✅ **定期从服务器拉取更新**
+- ✅ **双向同步**：本地 ↔ 云端
+- ✅ **冲突检测与解决**
+- ✅ **同步状态数据库管理**
+- ✅ **文件操作支持**：创建、修改、删除、重命名
+
+### Phase 3: 基础服务 ✅（已完成）
+
+- ✅ **数据压缩**
+- ✅ **文件级去重**
+- ✅ **块级去重**
+
+### Phase 4: 基础服务 ✅（已完成）
+
+- ✅ **差分同步**：rsync 算法
+- ✅ **断点续传**
+- ✅ **数据加密**
+
+### Phase 5: 基础服务 ✅（已完成）
+
+- ✅ **版本控制**
+- ✅ **冲突解决**
+- ✅ **文件共享与协作**
+- ✅ **自动同步客户端**：watchdog
 
 ## 🏗️ 架构
 
@@ -64,7 +90,7 @@
 
 ### 方法一：一键启动（推荐）
 
-#### Windows用户
+#### Windows 用户
 
 ```powershell
 # 1. 启动后端
@@ -79,7 +105,7 @@ cd Cloud-drive\client
 python client.py list
 ```
 
-#### Linux/Mac用户
+#### Linux/Mac 用户
 
 ```bash
 # 1. 启动后端
@@ -102,7 +128,7 @@ git clone https://github.com/YOUR_USERNAME/cloud-drive.git
 cd cloud-drive
 ```
 
-#### 2. 配置AWS（生产环境）
+#### 2. 配置 AWS（生产环境）
 
 详细步骤见 [docs/AWS_SETUP.md](docs/AWS_SETUP.md)
 
@@ -149,6 +175,7 @@ python client.py download 1
 ```
 
 完整教程：
+
 - [快速开始](docs/QUICK_START.md)
 - [详细使用指南](USAGE_GUIDE.md)
 
@@ -197,20 +224,20 @@ USER_ID=1
 DOWNLOAD_DIR=./downloads
 ```
 
-## 📚 API文档
+## 📚 API 文档
 
 启动后端后访问：http://localhost:8000/docs
 
 ### 主要接口
 
-| 方法 | 路径 | 说明 |
-|-----|------|-----|
-| POST | `/api/files/upload` | 上传文件 |
-| GET | `/api/files/download/{id}` | 下载文件 |
-| GET | `/api/files/list` | 列出文件 |
-| DELETE | `/api/files/delete/{id}` | 删除文件 |
-| POST | `/api/files/mkdir` | 创建目录 |
-| GET | `/api/files/info/{id}` | 获取文件信息 |
+| 方法   | 路径                       | 说明         |
+| ------ | -------------------------- | ------------ |
+| POST   | `/api/files/upload`        | 上传文件     |
+| GET    | `/api/files/download/{id}` | 下载文件     |
+| GET    | `/api/files/list`          | 列出文件     |
+| DELETE | `/api/files/delete/{id}`   | 删除文件     |
+| POST   | `/api/files/mkdir`         | 创建目录     |
+| GET    | `/api/files/info/{id}`     | 获取文件信息 |
 
 ## 🧪 测试
 
@@ -245,29 +272,29 @@ INFO - 分块 1/25 上传完成
 
 ### 单线程 vs 多线程对比
 
-| 文件大小 | 单线程 | 多线程(10并发) | 提升 |
-|---------|--------|---------------|------|
-| 10 MB | 5s | 4s | 20% |
-| 100 MB | 50s | 15s | 70% |
-| 500 MB | 250s | 45s | 82% |
-| 1 GB | 500s | 80s | 84% |
+| 文件大小 | 单线程 | 多线程(10 并发) | 提升 |
+| -------- | ------ | --------------- | ---- |
+| 10 MB    | 5s     | 4s              | 20%  |
+| 100 MB   | 50s    | 15s             | 70%  |
+| 500 MB   | 250s   | 45s             | 82%  |
+| 1 GB     | 500s   | 80s             | 84%  |
 
 **测试环境**：EC2 t2.small, 网络带宽 100Mbps
 
 ### 配置建议
 
-| EC2实例 | MAX_CONCURRENCY | CHUNK_SIZE |
-|---------|----------------|------------|
-| t2.micro | 3-5 | 4MB |
-| t2.small | 5-8 | 8MB |
-| t2.medium | 8-12 | 8MB |
-| t3.large | 12-20 | 16MB |
+| EC2 实例  | MAX_CONCURRENCY | CHUNK_SIZE |
+| --------- | --------------- | ---------- |
+| t2.micro  | 3-5             | 4MB        |
+| t2.small  | 5-8             | 8MB        |
+| t2.medium | 8-12            | 8MB        |
+| t3.large  | 12-20           | 16MB       |
 
 ## 📖 文档
 
-- [AWS配置指南](docs/AWS_SETUP.md) - S3和EC2配置
+- [AWS 配置指南](docs/AWS_SETUP.md) - S3 和 EC2 配置
 - [部署指南](docs/DEPLOYMENT.md) - 生产环境部署
-- [快速开始](docs/QUICK_START.md) - 5分钟上手
+- [快速开始](docs/QUICK_START.md) - 5 分钟上手
 
 ## 🛠️ 技术栈
 
@@ -308,45 +335,20 @@ Cloud-drive/
 
 ## 🔐 安全
 
-- JWT身份验证（计划中）
-- S3访问控制
+- JWT 身份验证
+- S3 访问控制
 - 用户隔离（每个用户独立目录）
 - 密码哈希（bcrypt）
-- HTTPS支持（生产环境）
+- HTTPS 支持（生产环境）
 
 ## 🚧 开发路线图
 
-- [x] Phase 1: 基础服务 + 多线程传输
-- [ ] Phase 2: 自动同步客户端
-- [ ] Phase 3: 压缩与去重
-- [ ] Phase 4: 差分同步
-- [ ] Phase 5: 版本控制与协作
-
-## 🤝 贡献
-
-欢迎提交Issue和Pull Request！
+- [✅] Phase 1: 基础服务 + 多线程传输
+- [✅] Phase 2: 自动同步客户端
+- [✅] Phase 3: 压缩与去重
+- [✅] Phase 4: 差分同步
+- [✅] Phase 5: 版本控制与协作
 
 ## 📄 许可
 
 MIT License
-
-## 👥 作者
-
-- 项目组成员1 - 后端架构
-- 项目组成员2 - 客户端开发
-- 项目组成员3 - 算法实现
-- 项目组成员4 - 测试部署
-
-## 🙏 致谢
-
-- [Nextcloud](https://nextcloud.com/) - 开源云盘参考
-- [Seafile](https://www.seafile.com/) - 架构参考
-- AWS Documentation - S3最佳实践
-
----
-
-**开始使用**: [docs/QUICK_START.md](docs/QUICK_START.md)
-
-**遇到问题**: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
-
-**联系我们**: your-email@example.com
